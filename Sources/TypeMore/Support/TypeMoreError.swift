@@ -1,0 +1,39 @@
+import Foundation
+
+enum TypeMoreError: LocalizedError {
+    case recordingNotActive
+    case recordingFileMissing
+    case transcriptionUnavailable
+    case llmAPIKeyMissing
+    case audioConversionUnavailable
+    case sherpaRuntimeUnavailable(String)
+    case sherpaModelMissing
+    case sherpaModelExtractionFailed
+    case modelDownloadFailed(String)
+    case recognitionBackendUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .recordingNotActive:
+            "Recording is not active."
+        case .recordingFileMissing:
+            "Recording file is missing."
+        case .transcriptionUnavailable:
+            "没有识别到语音文本。请确认麦克风输入正常，并至少说 1 秒以上。"
+        case .llmAPIKeyMissing:
+            "LLM API key is missing."
+        case .audioConversionUnavailable:
+            "Audio conversion is unavailable."
+        case .sherpaRuntimeUnavailable(let message):
+            message
+        case .sherpaModelMissing:
+            "Sherpa Paraformer model files are missing."
+        case .sherpaModelExtractionFailed:
+            "Failed to extract Sherpa Paraformer model archive."
+        case .modelDownloadFailed(let message):
+            message
+        case .recognitionBackendUnavailable(let message):
+            message
+        }
+    }
+}
