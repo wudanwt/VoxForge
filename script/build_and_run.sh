@@ -6,8 +6,8 @@ APP_NAME="VoxForge"
 APP_DISPLAY_NAME="VoxForge 声铸"
 BUILD_PRODUCT_NAME="TypeMore"
 BUNDLE_ID="com.voxforge.app"
-APP_VERSION="1.0.0"
-APP_BUILD="1"
+APP_VERSION="1.0.1"
+APP_BUILD="2"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -98,6 +98,9 @@ open_app() {
 }
 
 case "$MODE" in
+  --package|package)
+    echo "packaged: $APP_BUNDLE"
+    ;;
   run)
     open_app
     ;;
@@ -118,7 +121,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--package|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac
