@@ -20,7 +20,7 @@ APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 SHERPA_RUNTIME_DIR="$ROOT_DIR/Vendor/SherpaRuntime"
-APP_ICON="$ROOT_DIR/Assets/TypeMore.icns"
+APP_ICON="$ROOT_DIR/Assets/VoxForge.icns"
 APP_ICON_FILE="VoxForge.icns"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true

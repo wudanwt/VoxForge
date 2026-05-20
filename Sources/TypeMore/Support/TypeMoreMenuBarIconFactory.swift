@@ -7,7 +7,7 @@ enum TypeMoreMenuBarIconFactory {
         image.lockFocus()
         defer {
             image.unlockFocus()
-            image.isTemplate = state != .recording && state != .failed
+            image.isTemplate = state != .recording && state != .failed && state != .readyToSubmit
         }
 
         NSColor.clear.setFill()
@@ -15,11 +15,15 @@ enum TypeMoreMenuBarIconFactory {
 
         let ink: NSColor = {
             switch state {
-            case .recording:
+            case .recording, .failed:
                 return .systemRed
-            case .failed:
-                return .systemRed
-            default:
+            case .readyToSubmit:
+                return .systemGreen
+            case .processing, .inserting:
+                return .systemBlue
+            case .optimizing:
+                return .systemPurple
+            case .idle:
                 return .labelColor
             }
         }()
@@ -27,42 +31,44 @@ enum TypeMoreMenuBarIconFactory {
         ink.setFill()
         ink.setStroke()
 
-        let face = NSBezierPath(roundedRect: NSRect(x: 3.0, y: 2.0, width: 12.0, height: 12.0), xRadius: 4.2, yRadius: 4.2)
-        face.fill()
+        let vPath = NSBezierPath()
+        vPath.move(to: NSPoint(x: 2.5, y: 14.3))
+        vPath.line(to: NSPoint(x: 5.0, y: 14.3))
+        vPath.line(to: NSPoint(x: 8.7, y: 4.2))
+        vPath.line(to: NSPoint(x: 7.1, y: 2.1))
+        vPath.line(to: NSPoint(x: 5.6, y: 4.0))
+        vPath.close()
+        vPath.fill()
 
-        NSColor.clear.setFill()
-        let lowerCut = NSBezierPath(rect: NSRect(x: 3.0, y: 2.0, width: 12.0, height: 4.2))
-        lowerCut.fill()
+        let fPath = NSBezierPath()
+        fPath.move(to: NSPoint(x: 9.0, y: 3.0))
+        fPath.line(to: NSPoint(x: 11.1, y: 14.1))
+        fPath.line(to: NSPoint(x: 16.2, y: 14.7))
+        fPath.line(to: NSPoint(x: 15.2, y: 12.7))
+        fPath.line(to: NSPoint(x: 12.0, y: 12.2))
+        fPath.line(to: NSPoint(x: 11.6, y: 9.8))
+        fPath.line(to: NSPoint(x: 15.0, y: 10.2))
+        fPath.line(to: NSPoint(x: 14.0, y: 8.3))
+        fPath.line(to: NSPoint(x: 11.2, y: 8.0))
+        fPath.line(to: NSPoint(x: 10.5, y: 4.1))
+        fPath.close()
+        fPath.fill()
 
-        ink.setFill()
-        let jaw = NSBezierPath(roundedRect: NSRect(x: 4.2, y: 2.0, width: 9.6, height: 7.0), xRadius: 3.3, yRadius: 3.3)
-        jaw.fill()
+        let anvil = NSBezierPath(roundedRect: NSRect(x: 3.8, y: 1.2, width: 10.6, height: 2.0), xRadius: 0.7, yRadius: 0.7)
+        anvil.fill()
 
-        let hair = NSBezierPath()
-        hair.move(to: NSPoint(x: 3.4, y: 10.9))
-        hair.curve(to: NSPoint(x: 6.2, y: 15.0), controlPoint1: NSPoint(x: 3.7, y: 13.1), controlPoint2: NSPoint(x: 4.6, y: 14.4))
-        hair.line(to: NSPoint(x: 8.0, y: 13.8))
-        hair.line(to: NSPoint(x: 9.4, y: 15.2))
-        hair.line(to: NSPoint(x: 10.7, y: 13.7))
-        hair.line(to: NSPoint(x: 12.2, y: 14.8))
-        hair.curve(to: NSPoint(x: 14.7, y: 10.7), controlPoint1: NSPoint(x: 13.9, y: 14.0), controlPoint2: NSPoint(x: 14.8, y: 12.6))
-        hair.close()
-        hair.fill()
+        let wave = NSBezierPath()
+        wave.lineWidth = 1.4
+        wave.lineCapStyle = .round
+        wave.move(to: NSPoint(x: 1.3, y: 8.7))
+        wave.line(to: NSPoint(x: 2.5, y: 8.7))
+        wave.move(to: NSPoint(x: 15.5, y: 8.7))
+        wave.line(to: NSPoint(x: 16.7, y: 8.7))
+        wave.stroke()
 
-        let glasses = NSBezierPath()
-        glasses.lineWidth = 1.35
-        glasses.appendRoundedRect(NSRect(x: 3.7, y: 7.3, width: 4.6, height: 3.2), xRadius: 1.1, yRadius: 1.1)
-        glasses.appendRoundedRect(NSRect(x: 9.7, y: 7.3, width: 4.6, height: 3.2), xRadius: 1.1, yRadius: 1.1)
-        glasses.move(to: NSPoint(x: 8.3, y: 8.9))
-        glasses.line(to: NSPoint(x: 9.7, y: 8.9))
-        glasses.stroke()
-
-        let mouth = NSBezierPath(roundedRect: NSRect(x: 6.7, y: 4.3, width: 4.6, height: 1.35), xRadius: 0.7, yRadius: 0.7)
-        mouth.fill()
-
-        if state == .recording {
-            NSColor.systemRed.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 12.8, y: 12.6, width: 4.0, height: 4.0)).fill()
+        if state == .recording || state == .failed || state == .readyToSubmit {
+            ink.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 13.4, y: 13.0, width: 4.0, height: 4.0)).fill()
         }
 
         return image
