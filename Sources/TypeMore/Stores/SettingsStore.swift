@@ -92,6 +92,34 @@ final class SettingsStore {
         set { defaults.set(newValue, forKey: "llmCustomPrompt") }
     }
 
+    func llmPromptTemplate(for mode: DictationMode) -> String {
+        if let value = defaults.string(forKey: llmPromptTemplateKey(for: mode)) {
+            return value
+        }
+        if mode == .codingPrompt {
+            return llmCustomPrompt
+        }
+        return ""
+    }
+
+    func setLLMPromptTemplate(_ value: String, for mode: DictationMode) {
+        defaults.set(value, forKey: llmPromptTemplateKey(for: mode))
+        if mode == .codingPrompt {
+            llmCustomPrompt = value
+        }
+    }
+
+    func resetLLMPromptTemplate(for mode: DictationMode) {
+        defaults.removeObject(forKey: llmPromptTemplateKey(for: mode))
+        if mode == .codingPrompt {
+            defaults.removeObject(forKey: "llmCustomPrompt")
+        }
+    }
+
+    func resetAllLLMPromptTemplates() {
+        DictationMode.allCases.forEach { resetLLMPromptTemplate(for: $0) }
+    }
+
     var keepDebugRecordings: Bool {
         get { defaults.bool(forKey: "keepDebugRecordings") }
         set { defaults.set(newValue, forKey: "keepDebugRecordings") }
@@ -147,5 +175,9 @@ final class SettingsStore {
     private func setHotkey(_ hotkey: HotkeyDefinition, forKey key: String) {
         guard let data = try? JSONEncoder().encode(hotkey) else { return }
         defaults.set(data, forKey: key)
+    }
+
+    private func llmPromptTemplateKey(for mode: DictationMode) -> String {
+        "llmPrompt.\(mode.rawValue)"
     }
 }

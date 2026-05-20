@@ -150,7 +150,10 @@ VoxForge 声铸不会在识别引擎不可用时静默切换。若 sherpa runtim
 - Base URL 默认：`https://api.openai.com/v1`
 - 模型默认：`gpt-4.1-mini`
 - API Key：存入系统钥匙串，不写入 `UserDefaults`
-- 自定义提示词变量：`{rawTranscript}`、`{cleanedText}`、`{mode}`、`{app}`、`{style}`
+- 每个听写模式都有独立提示词模板：原文模式、通用整理、编程提示词。
+- 设置页会显式展示当前模式的默认提示词；编辑后会持久化为该模式自定义模板。
+- 可恢复当前模式默认提示词，也可恢复全部默认提示词。
+- 提示词变量：`{rawTranscript}`、`{cleanedText}`、`{mode}`、`{app}`、`{style}`
 
 处理顺序：
 

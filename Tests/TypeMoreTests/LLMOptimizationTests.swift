@@ -33,6 +33,8 @@ final class LLMOptimizationTests: XCTestCase {
         store.llmModel = "qwen3-coder"
         store.llmStyleInstruction = "更像 Cursor prompt"
         store.llmCustomPrompt = "把 {cleanedText} 改成适合 {app} 的最终输入。"
+        store.setLLMPromptTemplate("通用模板 {cleanedText}", for: .general)
+        store.setLLMPromptTemplate("编程模板 {app}", for: .codingPrompt)
         store.keepDebugRecordings = true
         store.transcriptionLanguage = .auto
         store.recognitionBackend = .whisperKitStreaming
@@ -48,7 +50,10 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(reloaded.llmBaseURL, "http://localhost:11434/v1")
         XCTAssertEqual(reloaded.llmModel, "qwen3-coder")
         XCTAssertEqual(reloaded.llmStyleInstruction, "更像 Cursor prompt")
-        XCTAssertEqual(reloaded.llmCustomPrompt, "把 {cleanedText} 改成适合 {app} 的最终输入。")
+        XCTAssertEqual(reloaded.llmCustomPrompt, "编程模板 {app}")
+        XCTAssertEqual(reloaded.llmPromptTemplate(for: .general), "通用模板 {cleanedText}")
+        XCTAssertEqual(reloaded.llmPromptTemplate(for: .codingPrompt), "编程模板 {app}")
+        XCTAssertEqual(reloaded.llmPromptTemplate(for: .literal), "")
         XCTAssertTrue(reloaded.keepDebugRecordings)
         XCTAssertEqual(reloaded.transcriptionLanguage, .auto)
         XCTAssertEqual(reloaded.recognitionBackend, .whisperKitStreaming)
@@ -78,6 +83,22 @@ final class LLMOptimizationTests: XCTestCase {
         let store = SettingsStore(defaults: defaults)
         XCTAssertEqual(store.recognitionBackend, .sherpaParaformer)
         XCTAssertEqual(defaults.string(forKey: "recognitionBackend"), RecognitionBackend.sherpaParaformer.rawValue)
+    }
+
+    func testSettingsStoreFallsBackFromLegacyCustomPromptForCodingTemplate() {
+        let suiteName = "TypeMoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("旧版编程提示词", forKey: "llmCustomPrompt")
+
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.llmPromptTemplate(for: .codingPrompt), "旧版编程提示词")
+        XCTAssertEqual(store.llmPromptTemplate(for: .general), "")
+
+        store.resetLLMPromptTemplate(for: .codingPrompt)
+        XCTAssertEqual(store.llmPromptTemplate(for: .codingPrompt), "")
+        XCTAssertEqual(store.llmCustomPrompt, "")
     }
 
     func testTranscriptionLanguageMapsToWhisperOptions() {

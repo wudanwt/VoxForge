@@ -30,6 +30,7 @@ final class AppModel {
     var llmModel: String
     var llmStyleInstruction: String
     var llmCustomPrompt: String
+    var llmPromptTemplateMode: DictationMode = .codingPrompt
     var llmAPIKey: String
     var keepDebugRecordings: Bool
     var whisperKitStreamingModel: String
@@ -54,6 +55,7 @@ final class AppModel {
     private let permissionCoordinator: PermissionCoordinator
     private let hotkeyCoordinator: HotkeyCoordinator
     private let externalTriggerService: ExternalTriggerService
+    private let foregroundApplicationTracker = ForegroundApplicationTracker()
     private let sherpaModelManager: SherpaModelManager
     private var recordingStart: Date?
     private var activeDictationPath: ActiveDictationPath?
@@ -238,7 +240,7 @@ final class AppModel {
         }
         guard isActiveOperation(operationID) else { return }
 
-        lastTargetApplication = RunningApplicationInfo.frontmost()
+        lastTargetApplication = foregroundApplicationTracker.targetApplication()
 
         switch recognitionBackend {
         case .sherpaParaformer:
@@ -462,6 +464,7 @@ final class AppModel {
         }
         guard isActiveOperation(operationID) else { return }
 
+        hudController.hide()
         transition(to: .inserting, message: "正在输入到 \(targetApp.displayName)", preview: finalText)
         try await textInsertionService.insert(finalText, targetBundleIdentifier: targetApp.bundleIdentifier)
         guard isActiveOperation(operationID) else { return }
@@ -472,7 +475,9 @@ final class AppModel {
             sendReturn()
         } else {
             transition(to: .readyToSubmit, message: "已输入到 \(targetApp.displayName)。再次按听写快捷键发送回车。", preview: finalText)
-            hudController.show(state: .readyToSubmit, message: "再次按快捷键发送回车", preview: finalText)
+            if NSApp.isActive && !NSApp.isHidden {
+                hudController.showReadyToSubmit(message: "已输入，下一次按键发送")
+            }
         }
     }
 
@@ -503,17 +508,30 @@ final class AppModel {
     func sendReturn() {
         Task {
             guard await ensureAccessibilityForInput(action: "发送回车") else { return }
+            let targetApp = resolvedReturnTargetApplication()
 
             do {
-                try textInsertionService.sendReturn()
+                try await textInsertionService.sendReturn(targetBundleIdentifier: targetApp.bundleIdentifier)
                 autoSubmitAfterDictation = false
                 activeOperationID = nil
-                transition(to: .idle, message: "已发送回车")
-                hudController.showCompletion(message: "已发送回车")
+                lastTargetApplication = nil
+                let message = targetApp.bundleIdentifier == RunningApplicationInfo.generic.bundleIdentifier
+                    ? "已发送回车"
+                    : "已向 \(targetApp.displayName) 发送回车"
+                transition(to: .idle, message: message)
             } catch {
                 fail("无法发送回车：\(error.localizedDescription)")
             }
         }
+    }
+
+    private func resolvedReturnTargetApplication() -> RunningApplicationInfo {
+        if let lastTargetApplication,
+           lastTargetApplication.bundleIdentifier != Bundle.main.bundleIdentifier,
+           lastTargetApplication.bundleIdentifier != RunningApplicationInfo.generic.bundleIdentifier {
+            return lastTargetApplication
+        }
+        return foregroundApplicationTracker.targetApplication()
     }
 
     private func ensureAccessibilityForInput(action: String) async -> Bool {
@@ -689,6 +707,43 @@ final class AppModel {
         settingsStore.llmCustomPrompt = value
     }
 
+    func llmPromptTemplate(for mode: DictationMode) -> String {
+        let customTemplate = settingsStore.llmPromptTemplate(for: mode)
+        if customTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return OpenAICompatibleOptimizationService.defaultPromptTemplate(for: mode)
+        }
+        return customTemplate
+    }
+
+    func isUsingDefaultLLMPromptTemplate(for mode: DictationMode) -> Bool {
+        settingsStore.llmPromptTemplate(for: mode)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+    }
+
+    func updateLLMPromptTemplateMode(_ mode: DictationMode) {
+        llmPromptTemplateMode = mode
+    }
+
+    func updateLLMPromptTemplate(_ value: String, for mode: DictationMode) {
+        settingsStore.setLLMPromptTemplate(value, for: mode)
+        if mode == .codingPrompt {
+            llmCustomPrompt = value
+        }
+    }
+
+    func resetLLMPromptTemplate(for mode: DictationMode) {
+        settingsStore.resetLLMPromptTemplate(for: mode)
+        if mode == .codingPrompt {
+            llmCustomPrompt = ""
+        }
+    }
+
+    func resetAllLLMPromptTemplates() {
+        settingsStore.resetAllLLMPromptTemplates()
+        llmCustomPrompt = ""
+    }
+
     func updateLLMAPIKey(_ value: String) {
         llmAPIKey = value
         keychainStore.setString(value, for: "llmAPIKey")
@@ -752,7 +807,7 @@ final class AppModel {
             apiKey: llmAPIKey,
             model: llmModel,
             styleInstruction: llmStyleInstruction,
-            customPrompt: llmCustomPrompt
+            customPrompt: settingsStore.llmPromptTemplate(for: selectedMode)
         )
     }
 
@@ -775,7 +830,7 @@ final class AppModel {
     private func transition(to state: DictationSessionState, message: String, preview: String? = nil) {
         sessionState = state
         statusMessage = message
-        if state == .idle {
+        if state == .idle || state == .readyToSubmit || state == .inserting {
             return
         }
         hudController.show(state: state, message: message, preview: preview)

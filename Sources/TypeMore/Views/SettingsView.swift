@@ -194,20 +194,44 @@ private struct LLMSettingsView: View {
                 .lineLimit(2...4)
                 .disabled(!appModel.llmOptimizationEnabled)
 
-            TextField("自定义提示词", text: llmCustomPromptBinding, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(8...14)
+            Section("提示词模板") {
+                Picker("当前模式", selection: llmPromptTemplateModeBinding) {
+                    ForEach(DictationMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
                 .disabled(!appModel.llmOptimizationEnabled)
+
+                HStack {
+                    Text(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? "正在使用默认提示词" : "正在使用自定义提示词")
+                        .font(.caption)
+                        .foregroundStyle(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? Color.secondary : Color.blue)
+                    Spacer()
+                    Button("恢复当前默认") {
+                        appModel.resetLLMPromptTemplate(for: appModel.llmPromptTemplateMode)
+                    }
+                    .disabled(!appModel.llmOptimizationEnabled || appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode))
+
+                    Button("恢复全部默认", role: .destructive) {
+                        appModel.resetAllLLMPromptTemplates()
+                    }
+                    .disabled(!appModel.llmOptimizationEnabled)
+                }
+
+                TextEditor(text: llmPromptTemplateBinding)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 220)
+                    .scrollContentBackground(.hidden)
+                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                    .disabled(!appModel.llmOptimizationEnabled)
+            }
 
             HStack {
                 Text("可用变量：{rawTranscript}、{cleanedText}、{mode}、{app}、{style}")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("恢复默认提示词") {
-                    appModel.updateLLMCustomPrompt("")
-                }
-                .disabled(!appModel.llmOptimizationEnabled)
             }
 
             Text("接口使用 OpenAI 兼容的 /v1/chat/completions。API Key 会存入系统钥匙串。")
@@ -251,10 +275,17 @@ private struct LLMSettingsView: View {
         )
     }
 
-    private var llmCustomPromptBinding: Binding<String> {
+    private var llmPromptTemplateModeBinding: Binding<DictationMode> {
         Binding(
-            get: { appModel.llmCustomPrompt },
-            set: { appModel.updateLLMCustomPrompt($0) }
+            get: { appModel.llmPromptTemplateMode },
+            set: { appModel.updateLLMPromptTemplateMode($0) }
+        )
+    }
+
+    private var llmPromptTemplateBinding: Binding<String> {
+        Binding(
+            get: { appModel.llmPromptTemplate(for: appModel.llmPromptTemplateMode) },
+            set: { appModel.updateLLMPromptTemplate($0, for: appModel.llmPromptTemplateMode) }
         )
     }
 }

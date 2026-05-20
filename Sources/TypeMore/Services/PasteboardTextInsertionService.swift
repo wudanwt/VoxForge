@@ -24,7 +24,9 @@ final class PasteboardTextInsertionService: TextInsertionService {
         }
     }
 
-    func sendReturn() throws {
+    func sendReturn(targetBundleIdentifier: String?) async throws {
+        activateTargetApp(bundleIdentifier: targetBundleIdentifier)
+        try? await Task.sleep(nanoseconds: 180_000_000)
         sendKey(keyCode: 36, flags: [])
     }
 
@@ -55,8 +57,18 @@ final class PasteboardTextInsertionService: TextInsertionService {
     }
 
     private func activateTargetApp(bundleIdentifier: String?) {
-        guard let bundleIdentifier, bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-        NSApp.hide(nil)
+        let shouldHideSelf = NSApp.isActive || bundleIdentifier == nil || bundleIdentifier == Bundle.main.bundleIdentifier || bundleIdentifier == RunningApplicationInfo.generic.bundleIdentifier
+        if shouldHideSelf {
+            NSApp.hide(nil)
+        }
+
+        guard let bundleIdentifier,
+              bundleIdentifier != Bundle.main.bundleIdentifier,
+              bundleIdentifier != RunningApplicationInfo.generic.bundleIdentifier
+        else {
+            return
+        }
+
         let target = NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleIdentifier)
             .first

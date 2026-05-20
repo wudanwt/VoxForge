@@ -79,7 +79,7 @@ protocol PostProcessingService {
 
 protocol TextInsertionService {
     func insert(_ text: String, targetBundleIdentifier: String?) async throws
-    func sendReturn() throws
+    func sendReturn(targetBundleIdentifier: String?) async throws
 }
 
 protocol PermissionCoordinator {
