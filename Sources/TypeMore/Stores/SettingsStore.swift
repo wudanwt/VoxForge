@@ -41,7 +41,7 @@ final class SettingsStore {
         get {
             guard let rawValue = defaults.string(forKey: "recognitionBackend") else { return .sherpaParaformer }
             let backend = RecognitionBackend(rawValue: rawValue) ?? .sherpaParaformer
-            if backend == .appleDictation {
+            if backend == .appleDictation && !RecognitionBackend.isAppleDictationSupported {
                 defaults.set(RecognitionBackend.sherpaParaformer.rawValue, forKey: "recognitionBackend")
                 return .sherpaParaformer
             }
@@ -65,6 +65,56 @@ final class SettingsStore {
         set {
             defaults.set(newValue, forKey: "saveHistory")
         }
+    }
+
+    var personalDictionary: [DictionaryEntry] {
+        get {
+            guard let data = defaults.data(forKey: "personalDictionary"),
+                  let entries = try? JSONDecoder().decode([DictionaryEntry].self, from: data)
+            else {
+                return DictionaryEntry.defaults
+            }
+
+            return Self.sanitizedDictionary(entries)
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(Self.sanitizedDictionary(newValue)) else { return }
+            defaults.set(data, forKey: "personalDictionary")
+        }
+    }
+
+    func resetPersonalDictionary() {
+        defaults.removeObject(forKey: "personalDictionary")
+    }
+
+    static func sanitizedDictionary(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        var output: [DictionaryEntry] = []
+
+        for entry in entries {
+            let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else { continue }
+
+            let aliases = entry.aliases
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && dictionaryKey(for: $0) != dictionaryKey(for: term) }
+                .reduce(into: [String]()) { result, alias in
+                    guard !result.contains(where: { dictionaryKey(for: $0) == dictionaryKey(for: alias) }) else { return }
+                    result.append(alias)
+                }
+            let note = entry.note.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let key = dictionaryKey(for: term)
+            output.removeAll { dictionaryKey(for: $0.term) == key }
+            output.append(DictionaryEntry(
+                id: entry.id,
+                term: term,
+                aliases: aliases,
+                note: note,
+                isEnabled: entry.isEnabled
+            ))
+        }
+
+        return output
     }
 
     var llmOptimizationEnabled: Bool {
@@ -179,5 +229,9 @@ final class SettingsStore {
 
     private func llmPromptTemplateKey(for mode: DictationMode) -> String {
         "llmPrompt.\(mode.rawValue)"
+    }
+
+    private static func dictionaryKey(for value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }

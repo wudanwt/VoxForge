@@ -3,7 +3,11 @@ import Foundation
 actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
     private let modelManager: SherpaModelManager
     private let hotwordsStore: SherpaHotwordsStore
-    private var session: SherpaOnnxSession?
+    private var recognizer: SherpaOnnxRecognizer?
+    private var recognizerSignature: String?
+    private var recognizerCreationTimedOut = false
+    private var recognizerPreparationTask: Task<SherpaOnnxRecognizer, Error>?
+    private var session: SherpaOnnxStreamSession?
     private var modelPaths: SherpaModelPaths?
     private var runtimeURL: URL?
     private var startedAt: Date?
@@ -20,14 +24,52 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         self.hotwordsStore = hotwordsStore
     }
 
-    func prepare(progress: @escaping @Sendable (SpeechModelState) -> Void) async throws -> SpeechModelState {
+    func prepare(
+        dictionary: [DictionaryEntry] = [],
+        progress: @escaping @Sendable (SpeechModelState) -> Void
+    ) async throws -> SpeechModelState {
+        if let recognizer {
+            return .ready(recognizer.version)
+        }
+        if recognizerCreationTimedOut {
+            throw TypeMoreError.recognitionBackendUnavailable("上一次中文极速模型预热超时。为避免重复卡住，请重启 VoxForge 或切换识别引擎。")
+        }
         guard let runtimeURL = SherpaRuntimeLocator.findRuntimeLibrary() else {
             throw TypeMoreError.sherpaRuntimeUnavailable("缺少 libsherpa-onnx-c-api.dylib。请先运行 script/setup_sherpa_onnx.sh，或把动态库放入 app 的 Frameworks。")
         }
         self.runtimeURL = runtimeURL
         let paths = try await modelManager.ensureModel(progress: progress)
         modelPaths = paths
-        return .ready("")
+        let hotwordsURL = try hotwordsStore.writeHotwords(dictionary: dictionary)
+        let signature = hotwordSignature(dictionary)
+        let preparedRecognizer: SherpaOnnxRecognizer
+        if let task = recognizerPreparationTask {
+            preparedRecognizer = try await task.value
+        } else {
+            progress(.ready("正在预热中文极速模型"))
+            let task = Task {
+                try await self.createRecognizerWithTimeout(
+                    libraryURL: runtimeURL,
+                    modelPaths: paths,
+                    hotwordsURL: hotwordsURL,
+                    timeout: 18
+                )
+            }
+            recognizerPreparationTask = task
+            do {
+                preparedRecognizer = try await task.value
+            } catch {
+                recognizerPreparationTask = nil
+                if case TypeMoreError.operationTimedOut = error {
+                    recognizerCreationTimedOut = true
+                }
+                throw error
+            }
+            recognizerPreparationTask = nil
+        }
+        recognizer = preparedRecognizer
+        recognizerSignature = signature
+        return .ready(preparedRecognizer.version)
     }
 
     func startSession(
@@ -36,27 +78,17 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         dictionary: [DictionaryEntry],
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws {
-        guard let runtimeURL = runtimeURL ?? SherpaRuntimeLocator.findRuntimeLibrary() else {
-            throw TypeMoreError.sherpaRuntimeUnavailable("缺少 sherpa-onnx 动态库。")
+        let activeRecognizer: SherpaOnnxRecognizer
+        if let recognizer {
+            activeRecognizer = recognizer
+        } else {
+            _ = try await prepare(dictionary: dictionary) { _ in }
+            activeRecognizer = try recognizer.unwrap(or: TypeMoreError.recognitionBackendUnavailable("中文极速 recognizer 尚未就绪。"))
         }
-        let paths = try modelPaths ?? modelManager.pathsIfPresent().unwrap(or: TypeMoreError.sherpaModelMissing)
-        let hotwordsURL = try hotwordsStore.writeHotwords(dictionary: dictionary)
-        let createdSession: SherpaOnnxSession
-        do {
-            createdSession = try SherpaOnnxSession(
-                libraryURL: runtimeURL,
-                modelPaths: paths,
-                hotwordsURL: hotwordsURL,
-                numThreads: 1
-            )
-        } catch {
-            createdSession = try SherpaOnnxSession(
-                libraryURL: runtimeURL,
-                modelPaths: paths,
-                hotwordsURL: nil,
-                numThreads: 1
-            )
+        if recognizerSignature != hotwordSignature(dictionary) {
+            // Keep the current recognizer for stability; updated hotwords take effect after refresh/restart.
         }
+        let createdSession = try activeRecognizer.createStreamSession()
         session = createdSession
         startedAt = Date()
         firstPartialAt = nil
@@ -121,6 +153,109 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         finalizationStartedAt = nil
         lastPartialText = ""
         onPartial = nil
+    }
+
+    func invalidatePreparedRecognizer() {
+        session?.close()
+        session = nil
+        recognizer?.close()
+        recognizer = nil
+        recognizerSignature = nil
+        recognizerCreationTimedOut = false
+        recognizerPreparationTask?.cancel()
+        recognizerPreparationTask = nil
+    }
+
+    private nonisolated func createRecognizerWithTimeout(
+        libraryURL: URL,
+        modelPaths: SherpaModelPaths,
+        hotwordsURL: URL?,
+        timeout: TimeInterval
+    ) async throws -> SherpaOnnxRecognizer {
+        let task = Task.detached(priority: .userInitiated) {
+            do {
+                return try SherpaOnnxRecognizer(
+                    libraryURL: libraryURL,
+                    modelPaths: modelPaths,
+                    hotwordsURL: hotwordsURL,
+                    numThreads: 1
+                )
+            } catch {
+                return try SherpaOnnxRecognizer(
+                    libraryURL: libraryURL,
+                    modelPaths: modelPaths,
+                    hotwordsURL: nil,
+                    numThreads: 1
+                )
+            }
+        }
+
+        return try await withTimeout(
+            seconds: timeout,
+            message: "sherpa-onnx 预热 Paraformer recognizer 超时。请重启 VoxForge 或切换识别引擎。"
+        ) {
+            try await task.value
+        }
+    }
+
+    private func hotwordSignature(_ dictionary: [DictionaryEntry]) -> String {
+        dictionary
+            .filter(\.isEnabled)
+            .map(\.term)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+            .joined(separator: "\u{1F}")
+    }
+
+    private nonisolated func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        message: String,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let task = Task {
+            try await operation()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let lock = NSLock()
+                var didResume = false
+
+                func resume(_ result: Result<T, Error>) {
+                    lock.lock()
+                    guard !didResume else {
+                        lock.unlock()
+                        return
+                    }
+                    didResume = true
+                    lock.unlock()
+
+                    switch result {
+                    case .success(let value):
+                        continuation.resume(returning: value)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+
+                Task {
+                    do {
+                        resume(.success(try await task.value))
+                    } catch {
+                        resume(.failure(error))
+                    }
+                }
+
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    task.cancel()
+                    resume(.failure(TypeMoreError.operationTimedOut(message)))
+                }
+            }
+        } onCancel: {
+            task.cancel()
+        }
     }
 }
 

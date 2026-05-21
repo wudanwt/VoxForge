@@ -8,8 +8,23 @@ enum RecognitionBackend: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    static var isAppleDictationSupported: Bool {
+        if #available(macOS 26.0, *) {
+            return true
+        }
+        return false
+    }
+
     static var selectableCases: [RecognitionBackend] {
-        [.sherpaParaformer, .whisperKitStreaming, .whisperKit]
+        selectableCases(isAppleDictationSupported: isAppleDictationSupported)
+    }
+
+    static func selectableCases(isAppleDictationSupported: Bool) -> [RecognitionBackend] {
+        var cases: [RecognitionBackend] = [.sherpaParaformer, .whisperKitStreaming, .whisperKit]
+        if isAppleDictationSupported {
+            cases.append(.appleDictation)
+        }
+        return cases
     }
 
     var title: String {
@@ -34,15 +49,15 @@ enum RecognitionBackend: String, CaseIterable, Codable, Identifiable, Sendable {
         case .whisperKit:
             "录完后使用 WhisperKit 整段转写，作为兼容兜底。"
         case .appleDictation:
-            "预留 macOS 26+ SpeechAnalyzer / DictationTranscriber 后端，当前版本会明确提示不可用。"
+            "macOS 26+ SpeechAnalyzer / DictationTranscriber，系统原生听写，实验可选。"
         }
     }
 
     var isStreaming: Bool {
         switch self {
-        case .sherpaParaformer, .whisperKitStreaming:
+        case .sherpaParaformer, .whisperKitStreaming, .appleDictation:
             true
-        case .whisperKit, .appleDictation:
+        case .whisperKit:
             false
         }
     }

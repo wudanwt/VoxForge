@@ -11,6 +11,9 @@ struct SettingsView: View {
             ProfilesSettingsView(appModel: appModel)
                 .tabItem { Label("应用配置", systemImage: "rectangle.3.group") }
 
+            DictionarySettingsView(appModel: appModel)
+                .tabItem { Label("词典", systemImage: "text.book.closed") }
+
             LLMSettingsView(appModel: appModel)
                 .tabItem { Label("大模型", systemImage: "sparkles") }
 
@@ -57,7 +60,7 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Apple 原生听写（macOS 26+ SpeechAnalyzer）仍在预留开发中，当前不会出现在可选识别引擎里。")
+            Text(RecognitionBackend.isAppleDictationSupported ? "Apple 原生听写使用 macOS 26+ SpeechAnalyzer，作为实验后端可选。" : "Apple 原生听写需要 macOS 26+ SpeechAnalyzer，当前系统不会显示该后端。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -163,7 +166,7 @@ private struct GeneralSettingsView: View {
         case .whisperKitStreaming:
             "实验 · \(backend.title)"
         case .appleDictation:
-            "预留 · \(backend.title)"
+            "实验 · \(backend.title)"
         case .whisperKit:
             backend.title
         }
@@ -174,70 +177,99 @@ private struct LLMSettingsView: View {
     @Bindable var appModel: AppModel
 
     var body: some View {
-        Form {
-            Toggle("启用大模型优化", isOn: llmEnabledBinding)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                settingsSection("连接配置") {
+                    Toggle("启用大模型优化", isOn: llmEnabledBinding)
 
-            TextField("Base URL", text: llmBaseURLBinding)
-                .textFieldStyle(.roundedBorder)
-                .disabled(!appModel.llmOptimizationEnabled)
-
-            SecureField("API Key", text: llmAPIKeyBinding)
-                .textFieldStyle(.roundedBorder)
-                .disabled(!appModel.llmOptimizationEnabled)
-
-            TextField("模型名", text: llmModelBinding)
-                .textFieldStyle(.roundedBorder)
-                .disabled(!appModel.llmOptimizationEnabled)
-
-            TextField("优化风格", text: llmStyleBinding, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(2...4)
-                .disabled(!appModel.llmOptimizationEnabled)
-
-            Section("提示词模板") {
-                Picker("当前模式", selection: llmPromptTemplateModeBinding) {
-                    ForEach(DictationMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                    LabeledContent("Base URL") {
+                        TextField("Base URL", text: llmBaseURLBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(!appModel.llmOptimizationEnabled)
                     }
-                }
-                .pickerStyle(.segmented)
-                .disabled(!appModel.llmOptimizationEnabled)
 
-                HStack {
-                    Text(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? "正在使用默认提示词" : "正在使用自定义提示词")
+                    LabeledContent("API Key") {
+                        SecureField("API Key", text: llmAPIKeyBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(!appModel.llmOptimizationEnabled)
+                    }
+
+                    LabeledContent("模型名") {
+                        TextField("模型名", text: llmModelBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(!appModel.llmOptimizationEnabled)
+                    }
+
+                    Text("接口使用 OpenAI 兼容的 /v1/chat/completions。API Key 会存入系统钥匙串。")
                         .font(.caption)
-                        .foregroundStyle(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? Color.secondary : Color.blue)
-                    Spacer()
-                    Button("恢复当前默认") {
-                        appModel.resetLLMPromptTemplate(for: appModel.llmPromptTemplateMode)
-                    }
-                    .disabled(!appModel.llmOptimizationEnabled || appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode))
-
-                    Button("恢复全部默认", role: .destructive) {
-                        appModel.resetAllLLMPromptTemplates()
-                    }
-                    .disabled(!appModel.llmOptimizationEnabled)
+                        .foregroundStyle(.secondary)
                 }
 
-                TextEditor(text: llmPromptTemplateBinding)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 220)
-                    .scrollContentBackground(.hidden)
-                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                settingsSection("优化行为") {
+                    LabeledContent("优化风格") {
+                        TextField("优化风格", text: llmStyleBinding, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(2...4)
+                            .disabled(!appModel.llmOptimizationEnabled)
+                    }
+                }
+
+                settingsSection("提示词模板") {
+                    Picker("当前模式", selection: llmPromptTemplateModeBinding) {
+                        ForEach(DictationMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                     .disabled(!appModel.llmOptimizationEnabled)
-            }
 
-            HStack {
-                Text("可用变量：{rawTranscript}、{cleanedText}、{mode}、{app}、{style}")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
+                    HStack {
+                        Text(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? "正在使用默认提示词" : "正在使用自定义提示词")
+                            .font(.caption)
+                            .foregroundStyle(appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode) ? Color.secondary : Color.blue)
+                        Spacer()
+                        Button("恢复当前默认") {
+                            appModel.resetLLMPromptTemplate(for: appModel.llmPromptTemplateMode)
+                        }
+                        .disabled(!appModel.llmOptimizationEnabled || appModel.isUsingDefaultLLMPromptTemplate(for: appModel.llmPromptTemplateMode))
 
-            Text("接口使用 OpenAI 兼容的 /v1/chat/completions。API Key 会存入系统钥匙串。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                        Button("恢复全部默认", role: .destructive) {
+                            appModel.resetAllLLMPromptTemplates()
+                        }
+                        .disabled(!appModel.llmOptimizationEnabled)
+                    }
+
+                    TextEditor(text: llmPromptTemplateBinding)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 260)
+                        .scrollContentBackground(.hidden)
+                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                        .disabled(!appModel.llmOptimizationEnabled)
+
+                    Text("可用变量：{rawTranscript}、{cleanedText}、{mode}、{app}、{style}")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onAppear {
+            appModel.loadLLMAPIKeyIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.20), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var llmEnabledBinding: Binding<Bool> {
@@ -327,6 +359,152 @@ private struct ProfilesSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+private struct DictionarySettingsView: View {
+    @Bindable var appModel: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("自定义词典")
+                        .font(.title2.weight(.semibold))
+                    Text("把人名、项目名、产品名或命令写成个人词条。大模型会结合上下文和常见误听判断是否应改成标准写法；未开启大模型时，仅对你明确填写的常见误听做本地兜底。")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Button {
+                        appModel.addDictionaryEntry()
+                    } label: {
+                        Label("新增词条", systemImage: "plus")
+                    }
+
+                    Button("恢复默认", role: .destructive) {
+                        appModel.resetPersonalDictionary()
+                    }
+
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    if appModel.personalDictionary.isEmpty {
+                        Text("还没有词条。可以添加标准词条，例如“吴律”，并按需补充常见误听“五律、无虑”。")
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 20)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(appModel.personalDictionary) { entry in
+                            DictionaryEntryRow(
+                                term: binding(for: entry, keyPath: \.term),
+                                aliases: aliasesBinding(for: entry),
+                                note: binding(for: entry, keyPath: \.note),
+                                isEnabled: enabledBinding(for: entry)
+                            ) {
+                                appModel.deleteDictionaryEntry(entry)
+                            }
+                        }
+                    }
+                }
+                .padding(14)
+                .background(.quaternary.opacity(0.20), in: RoundedRectangle(cornerRadius: 10))
+
+                Text("提示：标准词条会作为识别热词和大模型上下文；常见误听只用于后处理和大模型判断，不会强化给识别模型。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func binding(for entry: DictionaryEntry, keyPath: WritableKeyPath<DictionaryEntry, String>) -> Binding<String> {
+        Binding(
+            get: {
+                appModel.personalDictionary.first(where: { $0.id == entry.id })?[keyPath: keyPath] ?? ""
+            },
+            set: { value in
+                guard var updated = appModel.personalDictionary.first(where: { $0.id == entry.id }) else { return }
+                updated[keyPath: keyPath] = value
+                appModel.updateDictionaryEntry(updated)
+            }
+        )
+    }
+
+    private func aliasesBinding(for entry: DictionaryEntry) -> Binding<String> {
+        Binding(
+            get: {
+                appModel.personalDictionary.first(where: { $0.id == entry.id })?.aliases.joined(separator: "、") ?? ""
+            },
+            set: { value in
+                guard var updated = appModel.personalDictionary.first(where: { $0.id == entry.id }) else { return }
+                updated.aliases = value
+                    .components(separatedBy: CharacterSet(charactersIn: "、,，;；\n"))
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                appModel.updateDictionaryEntry(updated)
+            }
+        )
+    }
+
+    private func enabledBinding(for entry: DictionaryEntry) -> Binding<Bool> {
+        Binding(
+            get: {
+                appModel.personalDictionary.first(where: { $0.id == entry.id })?.isEnabled ?? true
+            },
+            set: { value in
+                guard var updated = appModel.personalDictionary.first(where: { $0.id == entry.id }) else { return }
+                updated.isEnabled = value
+                appModel.updateDictionaryEntry(updated)
+            }
+        )
+    }
+}
+
+private struct DictionaryEntryRow: View {
+    @Binding var term: String
+    @Binding var aliases: String
+    @Binding var note: String
+    @Binding var isEnabled: Bool
+    var onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Toggle("启用", isOn: $isEnabled)
+                    .toggleStyle(.checkbox)
+                Spacer()
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("删除词条")
+            }
+
+            LabeledContent("标准词条") {
+                TextField("例如：吴律", text: $term)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent("常见误听") {
+                TextField("例如：五律、无虑", text: $aliases)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            LabeledContent("说明") {
+                TextField("例如：我女儿名字，人名", text: $note, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

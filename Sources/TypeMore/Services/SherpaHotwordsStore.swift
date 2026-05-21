@@ -21,7 +21,8 @@ final class SherpaHotwordsStore {
 
     private func hotwords(from dictionary: [DictionaryEntry]) -> [String] {
         let dictionaryWords = dictionary
-            .map(\.replacement)
+            .filter(\.isEnabled)
+            .map(\.term)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter(isSupportedHotword)
 

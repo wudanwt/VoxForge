@@ -9,11 +9,19 @@ final class CodingPromptPostProcessor: PostProcessingService {
         var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for entry in dictionary {
-            output = output.replacingOccurrences(
-                of: entry.spoken,
-                with: entry.replacement,
-                options: [.caseInsensitive, .diacriticInsensitive]
-            )
+            guard entry.isEnabled else { continue }
+            let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else { continue }
+
+            for alias in entry.aliases {
+                let alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !alias.isEmpty else { continue }
+                output = output.replacingOccurrences(
+                    of: alias,
+                    with: term,
+                    options: [.caseInsensitive, .diacriticInsensitive]
+                )
+            }
         }
 
         guard mode != .literal else {

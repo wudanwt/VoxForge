@@ -10,8 +10,7 @@ struct TypeMoreApp: App {
         WindowGroup("VoxForge 声铸", id: "main") {
             ContentView(appModel: appModel)
                 .onAppear {
-                    appModel.configureHotkeysIfNeeded()
-                    appModel.startExternalTriggerIfNeeded()
+                    appModel.startAppServicesAfterLaunch()
                 }
         }
         .commands {

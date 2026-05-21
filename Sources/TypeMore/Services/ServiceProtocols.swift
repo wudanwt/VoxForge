@@ -25,7 +25,10 @@ protocol TranscriptionEngine {
 }
 
 protocol StreamingTranscriptionEngine {
-    func prepare(progress: @escaping @Sendable (SpeechModelState) -> Void) async throws -> SpeechModelState
+    func prepare(
+        dictionary: [DictionaryEntry],
+        progress: @escaping @Sendable (SpeechModelState) -> Void
+    ) async throws -> SpeechModelState
     func startSession(
         mode: DictationMode,
         language: TranscriptionLanguage,
@@ -52,6 +55,7 @@ struct LLMOptimizationConfiguration: Codable, Hashable {
     var model: String
     var styleInstruction: String
     var customPrompt: String
+    var dictionaryContext: String
 
     static let disabled = LLMOptimizationConfiguration(
         isEnabled: false,
@@ -59,7 +63,8 @@ struct LLMOptimizationConfiguration: Codable, Hashable {
         apiKey: "",
         model: "gpt-4.1-mini",
         styleInstruction: "直接可发送的编程提示词",
-        customPrompt: ""
+        customPrompt: "",
+        dictionaryContext: ""
     )
 }
 

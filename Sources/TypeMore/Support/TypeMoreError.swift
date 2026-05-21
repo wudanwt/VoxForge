@@ -11,6 +11,7 @@ enum TypeMoreError: LocalizedError {
     case sherpaModelExtractionFailed
     case modelDownloadFailed(String)
     case recognitionBackendUnavailable(String)
+    case operationTimedOut(String)
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +34,8 @@ enum TypeMoreError: LocalizedError {
         case .modelDownloadFailed(let message):
             message
         case .recognitionBackendUnavailable(let message):
+            message
+        case .operationTimedOut(let message):
             message
         }
     }

@@ -23,7 +23,8 @@ let package = Package(
             path: "Sources/TypeMore",
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("IOKit")
+                .linkedFramework("IOKit"),
+                .linkedFramework("Speech")
             ]
         ),
         .target(

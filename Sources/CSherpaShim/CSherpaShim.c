@@ -106,12 +106,12 @@ typedef void (*FnDestroyResult)(const SherpaOnnxOnlineRecognizerResult *);
 typedef void (*FnInputFinished)(const SherpaOnnxOnlineStream *);
 typedef void (*FnSetOption)(const SherpaOnnxOnlineStream *, const char *, const char *);
 
-struct TypeMoreSherpaSession {
+struct TypeMoreSherpaRecognizer {
     void *library_handle;
     const SherpaOnnxOnlineRecognizer *recognizer;
-    const SherpaOnnxOnlineStream *stream;
     FnGetVersionStr get_version;
     FnDestroyRecognizer destroy_recognizer;
+    FnCreateStream create_stream;
     FnDestroyStream destroy_stream;
     FnAcceptWaveform accept_waveform;
     FnIsReady is_ready;
@@ -120,6 +120,11 @@ struct TypeMoreSherpaSession {
     FnDestroyResult destroy_result;
     FnInputFinished input_finished;
     FnSetOption set_option;
+};
+
+struct TypeMoreSherpaStreamSession {
+    TypeMoreSherpaRecognizer *owner;
+    const SherpaOnnxOnlineStream *stream;
 };
 
 static void tm_set_error(char *buffer, int32_t size, const char *message) {
@@ -139,16 +144,16 @@ static void *tm_symbol(void *handle, const char *name, char *error, int32_t erro
     return symbol;
 }
 
-static void tm_decode_ready(TypeMoreSherpaSession *session) {
-    if (session == NULL || session->recognizer == NULL || session->stream == NULL) {
+static void tm_decode_ready(TypeMoreSherpaStreamSession *session) {
+    if (session == NULL || session->owner == NULL || session->owner->recognizer == NULL || session->stream == NULL) {
         return;
     }
-    while (session->is_ready(session->recognizer, session->stream)) {
-        session->decode(session->recognizer, session->stream);
+    while (session->owner->is_ready(session->owner->recognizer, session->stream)) {
+        session->owner->decode(session->owner->recognizer, session->stream);
     }
 }
 
-TypeMoreSherpaSession *tm_sherpa_create(
+TypeMoreSherpaRecognizer *tm_sherpa_create_recognizer(
     const char *library_path,
     const char *encoder_path,
     const char *decoder_path,
@@ -216,99 +221,119 @@ TypeMoreSherpaSession *tm_sherpa_create(
         return NULL;
     }
 
-    const SherpaOnnxOnlineStream *stream = create_stream(recognizer);
+    TypeMoreSherpaRecognizer *owner = (TypeMoreSherpaRecognizer *)calloc(1, sizeof(TypeMoreSherpaRecognizer));
+    owner->library_handle = library;
+    owner->recognizer = recognizer;
+    owner->get_version = get_version;
+    owner->destroy_recognizer = destroy_recognizer;
+    owner->create_stream = create_stream;
+    owner->destroy_stream = destroy_stream;
+    owner->accept_waveform = accept_waveform;
+    owner->is_ready = is_ready;
+    owner->decode = decode;
+    owner->get_result = get_result;
+    owner->destroy_result = destroy_result;
+    owner->input_finished = input_finished;
+    owner->set_option = set_option;
+    return owner;
+}
+
+TypeMoreSherpaStreamSession *tm_sherpa_create_stream_session(
+    TypeMoreSherpaRecognizer *recognizer,
+    char *error_buffer,
+    int32_t error_buffer_size) {
+    if (recognizer == NULL || recognizer->recognizer == NULL || recognizer->create_stream == NULL) {
+        tm_set_error(error_buffer, error_buffer_size, "sherpa-onnx recognizer 尚未就绪。");
+        return NULL;
+    }
+
+    const SherpaOnnxOnlineStream *stream = recognizer->create_stream(recognizer->recognizer);
     if (stream == NULL) {
-        destroy_recognizer(recognizer);
-        dlclose(library);
         tm_set_error(error_buffer, error_buffer_size, "sherpa-onnx 创建 streaming session 失败。");
         return NULL;
     }
 
-    TypeMoreSherpaSession *session = (TypeMoreSherpaSession *)calloc(1, sizeof(TypeMoreSherpaSession));
-    session->library_handle = library;
-    session->recognizer = recognizer;
+    TypeMoreSherpaStreamSession *session = (TypeMoreSherpaStreamSession *)calloc(1, sizeof(TypeMoreSherpaStreamSession));
+    session->owner = recognizer;
     session->stream = stream;
-    session->get_version = get_version;
-    session->destroy_recognizer = destroy_recognizer;
-    session->destroy_stream = destroy_stream;
-    session->accept_waveform = accept_waveform;
-    session->is_ready = is_ready;
-    session->decode = decode;
-    session->get_result = get_result;
-    session->destroy_result = destroy_result;
-    session->input_finished = input_finished;
-    session->set_option = set_option;
     return session;
 }
 
 void tm_sherpa_accept_waveform(
-    TypeMoreSherpaSession *session,
+    TypeMoreSherpaStreamSession *session,
     int32_t sample_rate,
     const float *samples,
     int32_t sample_count) {
-    if (session == NULL || samples == NULL || sample_count <= 0) {
+    if (session == NULL || session->owner == NULL || samples == NULL || sample_count <= 0) {
         return;
     }
-    session->accept_waveform(session->stream, sample_rate, samples, sample_count);
+    session->owner->accept_waveform(session->stream, sample_rate, samples, sample_count);
     tm_decode_ready(session);
 }
 
-void tm_sherpa_finish(TypeMoreSherpaSession *session) {
-    if (session == NULL) {
+void tm_sherpa_finish(TypeMoreSherpaStreamSession *session) {
+    if (session == NULL || session->owner == NULL) {
         return;
     }
-    if (session->set_option) {
-        session->set_option(session->stream, "is_final", "1");
+    if (session->owner->set_option) {
+        session->owner->set_option(session->stream, "is_final", "1");
     }
-    session->input_finished(session->stream);
+    session->owner->input_finished(session->stream);
     tm_decode_ready(session);
 }
 
 int32_t tm_sherpa_copy_result(
-    TypeMoreSherpaSession *session,
+    TypeMoreSherpaStreamSession *session,
     char *text_buffer,
     int32_t text_buffer_size) {
     if (text_buffer == NULL || text_buffer_size <= 0) {
         return 0;
     }
     text_buffer[0] = '\0';
-    if (session == NULL) {
+    if (session == NULL || session->owner == NULL) {
         return 0;
     }
 
-    const SherpaOnnxOnlineRecognizerResult *result = session->get_result(session->recognizer, session->stream);
+    const SherpaOnnxOnlineRecognizerResult *result = session->owner->get_result(session->owner->recognizer, session->stream);
     if (result == NULL || result->text == NULL) {
         if (result != NULL) {
-            session->destroy_result(result);
+            session->owner->destroy_result(result);
         }
         return 0;
     }
 
     snprintf(text_buffer, (size_t)text_buffer_size, "%s", result->text);
     int32_t length = (int32_t)strlen(text_buffer);
-    session->destroy_result(result);
+    session->owner->destroy_result(result);
     return length;
 }
 
-const char *tm_sherpa_version(TypeMoreSherpaSession *session) {
-    if (session == NULL || session->get_version == NULL) {
+const char *tm_sherpa_version(TypeMoreSherpaRecognizer *recognizer) {
+    if (recognizer == NULL || recognizer->get_version == NULL) {
         return "";
     }
-    return session->get_version();
+    return recognizer->get_version();
 }
 
-void tm_sherpa_destroy(TypeMoreSherpaSession *session) {
+void tm_sherpa_destroy_stream_session(TypeMoreSherpaStreamSession *session) {
     if (session == NULL) {
         return;
     }
-    if (session->stream != NULL) {
-        session->destroy_stream(session->stream);
-    }
-    if (session->recognizer != NULL) {
-        session->destroy_recognizer(session->recognizer);
-    }
-    if (session->library_handle != NULL) {
-        dlclose(session->library_handle);
+    if (session->stream != NULL && session->owner != NULL) {
+        session->owner->destroy_stream(session->stream);
     }
     free(session);
+}
+
+void tm_sherpa_destroy_recognizer(TypeMoreSherpaRecognizer *recognizer) {
+    if (recognizer == NULL) {
+        return;
+    }
+    if (recognizer->recognizer != NULL) {
+        recognizer->destroy_recognizer(recognizer->recognizer);
+    }
+    if (recognizer->library_handle != NULL) {
+        dlclose(recognizer->library_handle);
+    }
+    free(recognizer);
 }

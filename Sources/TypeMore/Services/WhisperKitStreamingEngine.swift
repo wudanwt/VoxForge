@@ -23,7 +23,10 @@ actor WhisperKitStreamingEngine: StreamingSpeechEngine {
         self.voiceActivityService = voiceActivityService
     }
 
-    func prepare(progress: @escaping @Sendable (SpeechModelState) -> Void) async throws -> SpeechModelState {
+    func prepare(
+        dictionary: [DictionaryEntry] = [],
+        progress: @escaping @Sendable (SpeechModelState) -> Void
+    ) async throws -> SpeechModelState {
         if whisperKit != nil {
             return .ready("WhisperKit \(modelName) 已预热")
         }
@@ -47,7 +50,7 @@ actor WhisperKitStreamingEngine: StreamingSpeechEngine {
         dictionary: [DictionaryEntry],
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws {
-        _ = try await prepare { _ in }
+        _ = try await prepare(dictionary: dictionary) { _ in }
         self.mode = mode
         self.language = language
         self.onPartial = onPartial

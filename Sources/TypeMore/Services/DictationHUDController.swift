@@ -125,6 +125,22 @@ private struct DictationHUDView: View {
     var preview: String?
     var placement: DictationHUDController.Placement
 
+    private var titleColor: Color {
+        Color(red: 0.96, green: 0.98, blue: 1.0)
+    }
+
+    private var messageColor: Color {
+        Color(red: 0.78, green: 0.86, blue: 0.96)
+    }
+
+    private var previewColor: Color {
+        Color(red: 0.58, green: 0.88, blue: 1.0)
+    }
+
+    private var hudFill: Color {
+        Color(red: 0.08, green: 0.10, blue: 0.13).opacity(0.82)
+    }
+
     var body: some View {
         if placement == .bottomIcon {
             Image(systemName: state.hudSymbolName)
@@ -146,14 +162,15 @@ private struct DictationHUDView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(state == .idle ? message : state.hudTitle)
                     .font(placement == .sideToast ? .subheadline.weight(.semibold) : .headline)
+                    .foregroundStyle(titleColor)
                 Text(state == .idle ? "完成" : message)
                     .font(placement == .sideToast ? .caption : .callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(messageColor)
                     .lineLimit(1)
                 if placement == .bottomCenter, let preview, !preview.isEmpty {
                     Text(preview)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(previewColor)
                         .lineLimit(1)
                 }
             }
@@ -163,10 +180,22 @@ private struct DictationHUDView: View {
         .padding(.horizontal, placement == .sideToast ? 14 : 18)
         .padding(.vertical, placement == .sideToast ? 12 : 14)
         .frame(width: placement.size.width, height: placement.size.height)
-        .background(.regularMaterial.opacity(placement == .sideToast ? 0.62 : 0.72), in: RoundedRectangle(cornerRadius: placement == .sideToast ? 16 : 18))
+        .background(.regularMaterial.opacity(placement == .sideToast ? 0.64 : 0.72), in: RoundedRectangle(cornerRadius: placement == .sideToast ? 16 : 18))
+        .background(hudFill, in: RoundedRectangle(cornerRadius: placement == .sideToast ? 16 : 18))
         .overlay(
             RoundedRectangle(cornerRadius: placement == .sideToast ? 16 : 18)
-                .stroke(.white.opacity(0.26), lineWidth: 1)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.56, green: 0.88, blue: 1.0).opacity(0.42),
+                            Color.white.opacity(0.18),
+                            Color(red: 1.0, green: 0.22, blue: 0.34).opacity(0.28)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
         )
         .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
         }

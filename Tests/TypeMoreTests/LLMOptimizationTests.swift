@@ -44,6 +44,11 @@ final class LLMOptimizationTests: XCTestCase {
         store.externalTriggerProductID = 16401
         store.externalTriggerSuppressVolume = false
         store.externalTriggerCancelModifier = .option
+        store.personalDictionary = [
+            DictionaryEntry(term: " 张三 ", aliases: [" 章三 ", ""], note: " 人名 "),
+            DictionaryEntry(term: "", aliases: ["空词条"]),
+            DictionaryEntry(term: "SwiftUI", aliases: ["swift ui"])
+        ]
 
         let reloaded = SettingsStore(defaults: defaults)
         XCTAssertTrue(reloaded.llmOptimizationEnabled)
@@ -63,14 +68,74 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(reloaded.externalTriggerProductID, 16401)
         XCTAssertFalse(reloaded.externalTriggerSuppressVolume)
         XCTAssertEqual(reloaded.externalTriggerCancelModifier, .option)
+        XCTAssertEqual(reloaded.personalDictionary.map(\.term), ["张三", "SwiftUI"])
+        XCTAssertEqual(reloaded.personalDictionary.map(\.aliases), [["章三"], ["swift ui"]])
+        XCTAssertEqual(reloaded.personalDictionary.first?.note, "人名")
+    }
+
+    func testSettingsStoreSanitizesAndResetsPersonalDictionary() {
+        let suiteName = "TypeMoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = SettingsStore(defaults: defaults)
+        store.personalDictionary = [
+            DictionaryEntry(term: " VoxForge ", aliases: ["vox forge"]),
+            DictionaryEntry(term: "voxforge", aliases: ["声铸"], note: " 应用名 "),
+            DictionaryEntry(term: "", aliases: ["只有右边"])
+        ]
+
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.personalDictionary.count, 1)
+        XCTAssertEqual(reloaded.personalDictionary.first?.term, "voxforge")
+        XCTAssertEqual(reloaded.personalDictionary.first?.aliases, ["声铸"])
+        XCTAssertEqual(reloaded.personalDictionary.first?.note, "应用名")
+
+        reloaded.resetPersonalDictionary()
+        XCTAssertEqual(reloaded.personalDictionary, DictionaryEntry.defaults)
+
+        reloaded.personalDictionary = []
+        XCTAssertEqual(SettingsStore(defaults: defaults).personalDictionary, [])
+    }
+
+    func testLegacyDictionaryEntryDecodesToTermAndAlias() throws {
+        let json = """
+        {
+          "id": "\(UUID().uuidString)",
+          "spoken": "五律",
+          "replacement": "吴律"
+        }
+        """
+
+        let entry = try JSONDecoder().decode(DictionaryEntry.self, from: Data(json.utf8))
+
+        XCTAssertEqual(entry.term, "吴律")
+        XCTAssertEqual(entry.aliases, ["五律"])
+        XCTAssertTrue(entry.note.isEmpty)
+        XCTAssertTrue(entry.isEnabled)
+    }
+
+    func testDictionaryContextIncludesPersonalTermsForLLM() {
+        let context = OpenAICompatibleOptimizationService.dictionaryContext(from: [
+            DictionaryEntry(term: "吴律", aliases: ["五律", "无虑"], note: "我女儿名字，人名"),
+            DictionaryEntry(term: "停用词", aliases: ["不会出现"], isEnabled: false)
+        ])
+
+        XCTAssertTrue(context.contains("标准词条：吴律"))
+        XCTAssertTrue(context.contains("常见误听：五律、无虑"))
+        XCTAssertTrue(context.contains("说明：我女儿名字，人名"))
+        XCTAssertFalse(context.contains("停用词"))
     }
 
     func testRecognitionBackendSeparatesStreamingAndBatchWhisperKit() {
         XCTAssertTrue(RecognitionBackend.sherpaParaformer.isStreaming)
         XCTAssertTrue(RecognitionBackend.whisperKitStreaming.isStreaming)
+        XCTAssertTrue(RecognitionBackend.appleDictation.isStreaming)
         XCTAssertFalse(RecognitionBackend.whisperKit.isStreaming)
-        XCTAssertFalse(RecognitionBackend.appleDictation.isStreaming)
-        XCTAssertFalse(RecognitionBackend.selectableCases.contains(.appleDictation))
+        XCTAssertEqual(
+            RecognitionBackend.selectableCases.contains(.appleDictation),
+            RecognitionBackend.isAppleDictationSupported
+        )
     }
 
     func testSettingsStoreMigratesUnavailableAppleBackendToSherpa() {
@@ -81,8 +146,13 @@ final class LLMOptimizationTests: XCTestCase {
         defaults.set(RecognitionBackend.appleDictation.rawValue, forKey: "recognitionBackend")
 
         let store = SettingsStore(defaults: defaults)
-        XCTAssertEqual(store.recognitionBackend, .sherpaParaformer)
-        XCTAssertEqual(defaults.string(forKey: "recognitionBackend"), RecognitionBackend.sherpaParaformer.rawValue)
+        if RecognitionBackend.isAppleDictationSupported {
+            XCTAssertEqual(store.recognitionBackend, .appleDictation)
+            XCTAssertEqual(defaults.string(forKey: "recognitionBackend"), RecognitionBackend.appleDictation.rawValue)
+        } else {
+            XCTAssertEqual(store.recognitionBackend, .sherpaParaformer)
+            XCTAssertEqual(defaults.string(forKey: "recognitionBackend"), RecognitionBackend.sherpaParaformer.rawValue)
+        }
     }
 
     func testSettingsStoreFallsBackFromLegacyCustomPromptForCodingTemplate() {

@@ -1,7 +1,7 @@
 import CSherpaShim
 import Foundation
 
-final class SherpaOnnxSession {
+final class SherpaOnnxRecognizer: @unchecked Sendable {
     private var handle: OpaquePointer?
 
     init(libraryURL: URL, modelPaths: SherpaModelPaths, hotwordsURL: URL?, numThreads: Int32 = 1) throws {
@@ -13,7 +13,7 @@ final class SherpaOnnxSession {
                     modelPaths.decoder.path.withCString { decoderPath in
                         modelPaths.tokens.path.withCString { tokensPath in
                             hotwordsPath.withCString { hotwords in
-                                tm_sherpa_create(
+                                tm_sherpa_create_recognizer(
                                     libraryPath,
                                     encoderPath,
                                     decoderPath,
@@ -32,7 +32,7 @@ final class SherpaOnnxSession {
 
         guard let created else {
             let message = String(cString: errorBuffer)
-            throw TypeMoreError.sherpaRuntimeUnavailable(message.isEmpty ? "无法创建 sherpa 会话。" : message)
+            throw TypeMoreError.sherpaRuntimeUnavailable(message.isEmpty ? "无法创建 sherpa recognizer。" : message)
         }
         handle = created
     }
@@ -46,6 +46,44 @@ final class SherpaOnnxSession {
             return ""
         }
         return String(cString: pointer)
+    }
+
+    func createStreamSession() throws -> SherpaOnnxStreamSession {
+        guard let handle else {
+            throw TypeMoreError.recognitionBackendUnavailable("sherpa recognizer 尚未就绪。")
+        }
+
+        var errorBuffer = [CChar](repeating: 0, count: 2048)
+        let created = errorBuffer.withUnsafeMutableBufferPointer { errorPointer in
+            tm_sherpa_create_stream_session(handle, errorPointer.baseAddress, Int32(errorPointer.count))
+        }
+
+        guard let created else {
+            let message = String(cString: errorBuffer)
+            throw TypeMoreError.sherpaRuntimeUnavailable(message.isEmpty ? "无法创建 sherpa streaming session。" : message)
+        }
+        return SherpaOnnxStreamSession(handle: created, recognizer: self)
+    }
+
+    func close() {
+        if let handle {
+            tm_sherpa_destroy_recognizer(handle)
+            self.handle = nil
+        }
+    }
+}
+
+final class SherpaOnnxStreamSession: @unchecked Sendable {
+    private var handle: OpaquePointer?
+    private let recognizer: SherpaOnnxRecognizer
+
+    fileprivate init(handle: OpaquePointer, recognizer: SherpaOnnxRecognizer) {
+        self.handle = handle
+        self.recognizer = recognizer
+    }
+
+    deinit {
+        close()
     }
 
     func accept(samples: [Float], sampleRate: Double) {
@@ -76,7 +114,7 @@ final class SherpaOnnxSession {
 
     func close() {
         if let handle {
-            tm_sherpa_destroy(handle)
+            tm_sherpa_destroy_stream_session(handle)
             self.handle = nil
         }
     }

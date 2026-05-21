@@ -47,8 +47,9 @@ final class AppModel {
     private let audioRecorder: AudioRecordingService
     private let streamingAudioRecorder: LiveAudioRecordingService
     private let transcriptionEngine: TranscriptionEngine
-    private let sherpaStreamingEngine: StreamingSpeechEngine
+    private var sherpaStreamingEngine: StreamingSpeechEngine
     private let whisperKitStreamingEngine: StreamingSpeechEngine
+    private let appleSpeechAnalyzerEngine: StreamingSpeechEngine?
     private let llmOptimizationService: LLMOptimizationService
     private let postProcessor: PostProcessingService
     private let textInsertionService: TextInsertionService
@@ -64,6 +65,12 @@ final class AppModel {
     private let keychainStore = KeychainStore()
     private let hudController = DictationHUDController()
     private var activeOperationID: UUID?
+    private var startupWatchdog: DispatchWorkItem?
+    private var sherpaPrewarmTask: Task<Void, Never>?
+    private var deferredSherpaPrewarmTask: Task<Void, Never>?
+    private var didStartAppServices = false
+    private var suppressAutomaticPrewarmUntil: Date?
+    private var hasLoadedLLMAPIKey = false
 
     init(
         audioRecorder: AudioRecordingService = AVAudioEngineRecordingService(),
@@ -85,6 +92,11 @@ final class AppModel {
         self.sherpaStreamingEngine = sherpaStreamingEngine ?? SherpaParaformerStreamingEngine(modelManager: sherpaModelManager)
         let persistedWhisperKitModel = settingsStore.whisperKitStreamingModel
         self.whisperKitStreamingEngine = whisperKitStreamingEngine ?? WhisperKitStreamingEngine(modelName: persistedWhisperKitModel)
+        if #available(macOS 26.0, *) {
+            self.appleSpeechAnalyzerEngine = AppleSpeechAnalyzerStreamingEngine()
+        } else {
+            self.appleSpeechAnalyzerEngine = nil
+        }
         self.llmOptimizationService = llmOptimizationService
         self.postProcessor = postProcessor
         self.textInsertionService = textInsertionService
@@ -102,6 +114,7 @@ final class AppModel {
         self.modelStatus = initialSpeechModelState.title
         self.accessibilityPermissionGranted = permissionCoordinator.hasAccessibilityPermission
         self.transcriptRecords = historyStore.load()
+        self.personalDictionary = settingsStore.personalDictionary
         self.llmOptimizationEnabled = settingsStore.llmOptimizationEnabled
         self.llmBaseURL = settingsStore.llmBaseURL
         self.llmModel = settingsStore.llmModel
@@ -109,7 +122,7 @@ final class AppModel {
         self.llmCustomPrompt = settingsStore.llmCustomPrompt
         self.keepDebugRecordings = settingsStore.keepDebugRecordings
         self.whisperKitStreamingModel = persistedWhisperKitModel
-        self.llmAPIKey = keychainStore.string(for: "llmAPIKey")
+        self.llmAPIKey = ""
         self.externalTriggerEnabled = settingsStore.externalTriggerEnabled
         self.externalTriggerVendorID = settingsStore.externalTriggerVendorID
         self.externalTriggerProductID = settingsStore.externalTriggerProductID
@@ -187,8 +200,104 @@ final class AppModel {
         hotkeyStatusMessage = HotkeyRegistrationResult.message(for: results)
     }
 
+    func startAppServicesAfterLaunch() {
+        guard !didStartAppServices else { return }
+        didStartAppServices = true
+        configureHotkeysIfNeeded()
+        startExternalTriggerIfNeeded()
+        refreshPermissions()
+        scheduleDeferredSherpaPrewarm(reason: "应用启动", delay: 3.0)
+    }
+
     func startExternalTriggerIfNeeded() {
         externalTriggerService.start()
+    }
+
+    func prewarmDefaultRecognitionBackendIfNeeded() {
+        startSherpaPrewarmIfEligible(respectSuppression: true)
+    }
+
+    private func startSherpaPrewarmIfEligible(respectSuppression: Bool) {
+        guard recognitionBackend == .sherpaParaformer else { return }
+        guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
+        if respectSuppression,
+           let suppressAutomaticPrewarmUntil,
+           Date() < suppressAutomaticPrewarmUntil {
+            scheduleDeferredSherpaPrewarm(reason: "等待授权流程结束", delay: suppressAutomaticPrewarmUntil.timeIntervalSinceNow + 0.5)
+            return
+        }
+        guard SherpaRuntimeLocator.findRuntimeLibrary() != nil else {
+            refreshSpeechModelStatus()
+            return
+        }
+        guard sherpaModelManager.pathsIfPresent() != nil else {
+            refreshSpeechModelStatus()
+            return
+        }
+        guard sherpaPrewarmTask == nil else { return }
+
+        sherpaPrewarmTask = Task { [weak self] in
+            guard let self else { return }
+            await self.prewarmSherpaRecognizer()
+        }
+    }
+
+    private func scheduleDeferredSherpaPrewarm(reason: String, delay: TimeInterval = 1.0) {
+        guard recognitionBackend == .sherpaParaformer else { return }
+        guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
+        deferredSherpaPrewarmTask?.cancel()
+        deferredSherpaPrewarmTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(delay, 0) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.deferredSherpaPrewarmTask = nil
+                self.startSherpaPrewarmIfEligible(respectSuppression: true)
+            }
+        }
+        statusMessage = "\(reason)：将在后台预热中文极速模型"
+    }
+
+    private func cancelDeferredSherpaPrewarm() {
+        deferredSherpaPrewarmTask?.cancel()
+        deferredSherpaPrewarmTask = nil
+    }
+
+    private func suppressAutomaticSherpaPrewarm(for seconds: TimeInterval) {
+        suppressAutomaticPrewarmUntil = Date().addingTimeInterval(seconds)
+        cancelDeferredSherpaPrewarm()
+    }
+
+    private func prewarmSherpaRecognizer() async {
+        defer { sherpaPrewarmTask = nil }
+        guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
+        do {
+            speechModelState = .downloading(1)
+            modelStatus = "正在预热中文极速模型"
+            let state = try await withTimeout(
+                seconds: 20,
+                message: "中文极速模型预热超时。请重启 VoxForge 或切换识别引擎。"
+            ) {
+                try await self.sherpaStreamingEngine.prepare(dictionary: self.personalDictionary) { [weak self] state in
+                    Task { @MainActor in
+                        guard let self, self.recognitionBackend == .sherpaParaformer else { return }
+                        self.speechModelState = state
+                        self.modelStatus = state.title
+                    }
+                }
+            }
+            guard recognitionBackend == .sherpaParaformer else { return }
+            guard activeOperationID == nil else { return }
+            speechModelState = state
+            modelStatus = state.title
+        } catch {
+            guard recognitionBackend == .sherpaParaformer else { return }
+            guard activeOperationID == nil else { return }
+            speechModelState = .failed(error.localizedDescription)
+            modelStatus = speechModelState.title
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func configureExternalTrigger() {
@@ -224,17 +333,19 @@ final class AppModel {
         case .readyToSubmit:
             sendReturn()
         case .processing, .optimizing, .inserting:
-            statusMessage = "当前听写正在处理中"
+            interruptCurrentFlow()
         }
     }
 
     func startDictation() async {
+        cancelDeferredSherpaPrewarm()
         let operationID = UUID()
         activeOperationID = operationID
         errorMessage = nil
         transition(to: .processing, message: "正在检查麦克风权限")
         guard await permissionCoordinator.ensureMicrophonePermission() else {
             guard isActiveOperation(operationID) else { return }
+            suppressAutomaticSherpaPrewarm(for: 8)
             fail("需要麦克风权限才能听写。")
             return
         }
@@ -264,7 +375,18 @@ final class AppModel {
             )
             return
         case .appleDictation:
-            fail("Apple 原生听写后端预留给 macOS 26+ SpeechAnalyzer，当前版本尚未启用。请切换到中文极速本地或 WhisperKit 流式。")
+            guard let appleSpeechAnalyzerEngine else {
+                fail("Apple 原生听写需要 macOS 26+ SpeechAnalyzer。请切换到中文极速本地或 WhisperKit 流式。")
+                return
+            }
+            await startStreamingDictation(
+                engine: appleSpeechAnalyzerEngine,
+                backend: .appleDictation,
+                operationID: operationID,
+                preparingMessage: "正在准备 Apple 原生听写",
+                recordingMessage: "正在听写：Apple 原生听写",
+                failurePrefix: "Apple 原生听写启动失败"
+            )
             return
         case .whisperKit:
             break
@@ -293,6 +415,12 @@ final class AppModel {
             await finishStreamingDictation(engine: sherpaStreamingEngine, operationID: operationID, finishMessage: "正在收尾中文极速识别")
         case .whisperKitStreaming:
             await finishStreamingDictation(engine: whisperKitStreamingEngine, operationID: operationID, finishMessage: "正在完成 WhisperKit 流式识别")
+        case .appleDictation:
+            guard let appleSpeechAnalyzerEngine else {
+                fail("Apple 原生听写需要 macOS 26+ SpeechAnalyzer。")
+                return
+            }
+            await finishStreamingDictation(engine: appleSpeechAnalyzerEngine, operationID: operationID, finishMessage: "正在完成 Apple 原生听写")
         case .whisperKit, .none:
             await finishWhisperKitDictation(operationID: operationID)
         }
@@ -306,13 +434,24 @@ final class AppModel {
         recordingMessage: String,
         failurePrefix: String
     ) async {
+        scheduleStartupWatchdog(
+            operationID: operationID,
+            backend: backend,
+            seconds: startupWatchdogTimeout(for: backend),
+            failurePrefix: failurePrefix
+        )
         do {
             transition(to: .processing, message: preparingMessage)
-            let state = try await engine.prepare { [weak self] state in
-                Task { @MainActor in
-                    self?.speechModelState = state
-                    self?.modelStatus = state.title
-                    self?.hudController.show(state: .processing, message: state.title)
+            let state = try await withTimeout(
+                seconds: prepareTimeout(for: backend),
+                message: "\(failurePrefix)：准备阶段超时。请点“刷新状态”后重试；如果仍卡住，请重启 VoxForge 或切换识别引擎。"
+            ) {
+                try await engine.prepare(dictionary: self.personalDictionary) { [weak self] state in
+                    Task { @MainActor in
+                        self?.speechModelState = state
+                        self?.modelStatus = state.title
+                        self?.hudController.show(state: .processing, message: state.title)
+                    }
                 }
             }
             guard isActiveOperation(operationID) else {
@@ -321,19 +460,26 @@ final class AppModel {
             }
             speechModelState = state
             modelStatus = state.title
+            activeDictationPath = ActiveDictationPath(backend: backend)
+            transition(to: .processing, message: "正在创建\(backend.title)识别会话")
 
-            try await engine.startSession(
-                mode: selectedMode,
-                language: transcriptionLanguage,
-                dictionary: personalDictionary,
-                onPartial: { [weak self] partial in
-                    Task { @MainActor in
-                        guard self?.isActiveOperation(operationID) == true else { return }
-                        self?.lastTranscript = partial
-                        self?.hudController.show(state: .recording, message: "正在听写：实时识别中", preview: partial)
+            try await withTimeout(
+                seconds: sessionStartupTimeout(for: backend),
+                message: "\(failurePrefix)：创建识别会话超时。通常是 sherpa runtime 或模型加载卡住，请重试或重启 VoxForge。"
+            ) {
+                try await engine.startSession(
+                    mode: self.selectedMode,
+                    language: self.transcriptionLanguage,
+                    dictionary: self.personalDictionary,
+                    onPartial: { [weak self] partial in
+                        Task { @MainActor in
+                            guard self?.isActiveOperation(operationID) == true else { return }
+                            self?.lastTranscript = partial
+                            self?.hudController.show(state: .recording, message: "正在听写：实时识别中", preview: partial)
+                        }
                     }
-                }
-            )
+                )
+            }
 
             try streamingAudioRecorder.startStreaming(keepDebugFile: keepDebugRecordings) { samples, sampleRate in
                 Task {
@@ -346,15 +492,19 @@ final class AppModel {
                 return
             }
             recordingStart = Date()
-            activeDictationPath = ActiveDictationPath(backend: backend)
+            cancelStartupWatchdog()
             transition(to: .recording, message: recordingMessage)
         } catch {
             guard isActiveOperation(operationID) else { return }
-            await engine.cancel()
+            cancelStartupWatchdog()
+            cancelEngineAfterStartupFailure(engine, error: error)
             activeDictationPath = nil
+            if backend == .sherpaParaformer {
+                rebuildSherpaStreamingEngine()
+            }
             speechModelState = .failed(error.localizedDescription)
             modelStatus = speechModelState.title
-            fail("\(failurePrefix)：\(error.localizedDescription)。当前设置为 \(backend.title)，不会自动切换其他识别引擎。")
+            fail("\(error.localizedDescription)。当前设置为 \(backend.title)，不会自动切换其他识别引擎。")
         }
     }
 
@@ -379,8 +529,12 @@ final class AppModel {
             )
         } catch {
             guard isActiveOperation(operationID) else { return }
+            let wasSherpa = activeDictationPath == .sherpaParaformer
             activeDictationPath = nil
             await engine.cancel()
+            if wasSherpa {
+                rebuildSherpaStreamingEngine()
+            }
             fail("听写失败：\(error.localizedDescription)")
         }
     }
@@ -426,6 +580,7 @@ final class AppModel {
         var optimizedWithLLM = false
 
         if llmOptimizationEnabled {
+            loadLLMAPIKeyIfNeeded()
             transition(to: .optimizing, message: "正在用大模型优化", preview: processed)
             do {
                 finalText = try await llmOptimizationService.optimize(
@@ -490,13 +645,20 @@ final class AppModel {
             hudController.hide()
             return
         }
+        cancelStartupWatchdog()
         activeOperationID = nil
         if activeDictationPath == .sherpaParaformer {
             _ = try? streamingAudioRecorder.stopStreaming()
             Task { await sherpaStreamingEngine.cancel() }
+            rebuildSherpaStreamingEngine()
         } else if activeDictationPath == .whisperKitStreaming {
             _ = try? streamingAudioRecorder.stopStreaming()
             Task { await whisperKitStreamingEngine.cancel() }
+        } else if activeDictationPath == .appleDictation {
+            _ = try? streamingAudioRecorder.stopStreaming()
+            if let appleSpeechAnalyzerEngine {
+                Task { await appleSpeechAnalyzerEngine.cancel() }
+            }
         } else if sessionState == .recording {
             _ = try? audioRecorder.stopRecording()
         }
@@ -546,6 +708,7 @@ final class AppModel {
             return true
         }
 
+        suppressAutomaticSherpaPrewarm(for: 12)
         permissionCoordinator.openAccessibilityPrompt()
         fail(accessibilityHelpMessage(action: action))
         return false
@@ -553,6 +716,128 @@ final class AppModel {
 
     private func isActiveOperation(_ operationID: UUID) -> Bool {
         activeOperationID == operationID
+    }
+
+    private func prepareTimeout(for backend: RecognitionBackend) -> TimeInterval {
+        switch backend {
+        case .sherpaParaformer:
+            return sherpaModelManager.pathsIfPresent() == nil ? 180 : 20
+        case .whisperKitStreaming:
+            return 180
+        case .appleDictation:
+            return 90
+        case .whisperKit:
+            return 60
+        }
+    }
+
+    private func sessionStartupTimeout(for backend: RecognitionBackend) -> TimeInterval {
+        switch backend {
+        case .sherpaParaformer:
+            return 20
+        case .whisperKitStreaming, .appleDictation:
+            return 30
+        case .whisperKit:
+            return 20
+        }
+    }
+
+    private func startupWatchdogTimeout(for backend: RecognitionBackend) -> TimeInterval {
+        prepareTimeout(for: backend) + sessionStartupTimeout(for: backend) + 5
+    }
+
+    private func scheduleStartupWatchdog(
+        operationID: UUID,
+        backend: RecognitionBackend,
+        seconds: TimeInterval,
+        failurePrefix: String
+    ) {
+        cancelStartupWatchdog()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      self.isActiveOperation(operationID),
+                      self.sessionState == .processing
+                else { return }
+
+                if backend == .sherpaParaformer {
+                    self.rebuildSherpaStreamingEngine()
+                }
+                self.activeDictationPath = nil
+                self.speechModelState = .failed("启动超时")
+                self.modelStatus = self.speechModelState.title
+                self.fail("\(failurePrefix)：启动超过 \(Int(seconds)) 秒仍未完成。已重置中文极速引擎，请重试；如果仍频繁发生，请重启 VoxForge 或切换识别引擎。")
+            }
+        }
+        startupWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    private func cancelStartupWatchdog() {
+        startupWatchdog?.cancel()
+        startupWatchdog = nil
+    }
+
+    private func cancelEngineAfterStartupFailure(_ engine: StreamingSpeechEngine, error: Error) {
+        if case TypeMoreError.operationTimedOut = error {
+            Task { await engine.cancel() }
+        } else {
+            Task { await engine.cancel() }
+        }
+    }
+
+    private func rebuildSherpaStreamingEngine() {
+        sherpaStreamingEngine = SherpaParaformerStreamingEngine(modelManager: sherpaModelManager)
+    }
+
+    private func withTimeout<T>(
+        seconds: TimeInterval,
+        message: String,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let task = Task {
+            try await operation()
+        }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let lock = NSLock()
+                var didResume = false
+
+                func resume(_ result: Result<T, Error>) {
+                    lock.lock()
+                    guard !didResume else {
+                        lock.unlock()
+                        return
+                    }
+                    didResume = true
+                    lock.unlock()
+
+                    switch result {
+                    case .success(let value):
+                        continuation.resume(returning: value)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+
+                Task {
+                    do {
+                        resume(.success(try await task.value))
+                    } catch {
+                        resume(.failure(error))
+                    }
+                }
+
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    task.cancel()
+                    resume(.failure(TypeMoreError.operationTimedOut(message)))
+                }
+            }
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func accessibilityHelpMessage(action: String) -> String {
@@ -569,6 +854,7 @@ final class AppModel {
     }
 
     func requestAccessibility() {
+        suppressAutomaticSherpaPrewarm(for: 12)
         permissionCoordinator.openAccessibilityPrompt()
         refreshPermissions()
         if !accessibilityPermissionGranted {
@@ -587,6 +873,7 @@ final class AppModel {
                 hudController.hide()
             }
             statusMessage = "辅助功能权限已开启，可以开始听写。"
+            scheduleDeferredSherpaPrewarm(reason: "辅助功能权限已开启", delay: 1.5)
         }
     }
 
@@ -594,6 +881,29 @@ final class AppModel {
         transcriptRecords = []
         historyStore.save([])
         statusMessage = "历史记录已清空"
+    }
+
+    func addDictionaryEntry() {
+        personalDictionary.append(DictionaryEntry(term: ""))
+        statusMessage = "已新增词典词条"
+    }
+
+    func updateDictionaryEntry(_ entry: DictionaryEntry) {
+        guard let index = personalDictionary.firstIndex(where: { $0.id == entry.id }) else { return }
+        personalDictionary[index] = entry
+        persistPersonalDictionary()
+    }
+
+    func deleteDictionaryEntry(_ entry: DictionaryEntry) {
+        personalDictionary.removeAll { $0.id == entry.id }
+        persistPersonalDictionary()
+        statusMessage = "词典词条已删除"
+    }
+
+    func resetPersonalDictionary() {
+        settingsStore.resetPersonalDictionary()
+        personalDictionary = settingsStore.personalDictionary
+        statusMessage = "词典已恢复默认"
     }
 
     func updateHotkey(_ target: HotkeyTarget, to hotkey: HotkeyDefinition) {
@@ -625,6 +935,7 @@ final class AppModel {
         settingsStore.recognitionBackend = backend
         updateRecognitionBackendStatus(backend)
         errorMessage = nil
+        scheduleDeferredSherpaPrewarm(reason: "识别引擎已切换", delay: 1.0)
     }
 
     private func updateRecognitionBackendStatus(_ backend: RecognitionBackend) {
@@ -636,7 +947,9 @@ final class AppModel {
         case .whisperKit:
             modelStatus = "WhisperKit batch 兼容"
         case .appleDictation:
-            modelStatus = "Apple 原生听写预留给 macOS 26+"
+            modelStatus = RecognitionBackend.isAppleDictationSupported
+                ? "Apple 原生听写可用（实验）"
+                : "Apple 原生听写需要 macOS 26+"
         }
     }
 
@@ -685,6 +998,12 @@ final class AppModel {
     func updateLLMOptimizationEnabled(_ enabled: Bool) {
         llmOptimizationEnabled = enabled
         settingsStore.llmOptimizationEnabled = enabled
+    }
+
+    func loadLLMAPIKeyIfNeeded() {
+        guard !hasLoadedLLMAPIKey else { return }
+        llmAPIKey = keychainStore.string(for: "llmAPIKey")
+        hasLoadedLLMAPIKey = true
     }
 
     func updateLLMBaseURL(_ value: String) {
@@ -746,6 +1065,7 @@ final class AppModel {
 
     func updateLLMAPIKey(_ value: String) {
         llmAPIKey = value
+        hasLoadedLLMAPIKey = true
         keychainStore.setString(value, for: "llmAPIKey")
     }
 
@@ -800,6 +1120,32 @@ final class AppModel {
         ))
     }
 
+    private func persistPersonalDictionary() {
+        settingsStore.personalDictionary = personalDictionary
+        let sanitized = SettingsStore.sanitizedDictionary(personalDictionary)
+        let draftEntries = personalDictionary.filter {
+            $0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        personalDictionary = sanitized + draftEntries
+        refreshSherpaRecognizerAfterDictionaryChange()
+    }
+
+    private func refreshSherpaRecognizerAfterDictionaryChange() {
+        guard recognitionBackend == .sherpaParaformer else { return }
+        guard sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
+        sherpaPrewarmTask?.cancel()
+        sherpaPrewarmTask = nil
+        Task { [weak self] in
+            guard let self else { return }
+            if let sherpaEngine = self.sherpaStreamingEngine as? SherpaParaformerStreamingEngine {
+                await sherpaEngine.invalidatePreparedRecognizer()
+            }
+            await MainActor.run {
+                self.scheduleDeferredSherpaPrewarm(reason: "词典已更新", delay: 1.0)
+            }
+        }
+    }
+
     var llmConfiguration: LLMOptimizationConfiguration {
         LLMOptimizationConfiguration(
             isEnabled: llmOptimizationEnabled,
@@ -807,7 +1153,8 @@ final class AppModel {
             apiKey: llmAPIKey,
             model: llmModel,
             styleInstruction: llmStyleInstruction,
-            customPrompt: settingsStore.llmPromptTemplate(for: selectedMode)
+            customPrompt: settingsStore.llmPromptTemplate(for: selectedMode),
+            dictionaryContext: OpenAICompatibleOptimizationService.dictionaryContext(from: personalDictionary)
         )
     }
 
@@ -865,6 +1212,7 @@ final class AppModel {
 private enum ActiveDictationPath {
     case sherpaParaformer
     case whisperKitStreaming
+    case appleDictation
     case whisperKit
 
     init(backend: RecognitionBackend) {
@@ -873,7 +1221,9 @@ private enum ActiveDictationPath {
             self = .sherpaParaformer
         case .whisperKitStreaming:
             self = .whisperKitStreaming
-        case .whisperKit, .appleDictation:
+        case .appleDictation:
+            self = .appleDictation
+        case .whisperKit:
             self = .whisperKit
         }
     }

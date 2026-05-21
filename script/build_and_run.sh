@@ -6,8 +6,8 @@ APP_NAME="VoxForge"
 APP_DISPLAY_NAME="VoxForge 声铸"
 BUILD_PRODUCT_NAME="TypeMore"
 BUNDLE_ID="com.voxforge.app"
-APP_VERSION="1.0.1"
-APP_BUILD="2"
+APP_VERSION="1.0.2"
+APP_BUILD="3"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,6 +77,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>NSApplication</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>VoxForge 声铸会在本机录制你的语音，用于转写并输入到当前应用。</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>VoxForge 声铸会使用 Apple 原生语音识别来在本机完成听写。</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>VoxForge 声铸可能需要自动化权限来配合当前应用完成输入。</string>
 </dict>
