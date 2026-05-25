@@ -627,6 +627,54 @@ private struct PrivacySettingsView: View {
 
             Toggle("保留录音调试文件", isOn: keepDebugRecordingsBinding)
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("诊断日志")
+                    .font(.headline)
+
+                Picker("失败录音", selection: diagnosticAudioRetentionBinding) {
+                    ForEach(DiagnosticAudioRetentionPolicy.allCases) { policy in
+                        Text(policy.title).tag(policy)
+                    }
+                }
+
+                if let summary = appModel.recentDiagnosticFailureSummary {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("最近失败：\(summary.phase)")
+                        Text(summary.timestamp.formatted(date: .abbreviated, time: .standard))
+                        Text(summary.error)
+                        if let backend = summary.backend {
+                            Text("识别引擎：\(backend)")
+                        }
+                        if let audioInput = summary.audioInput {
+                            Text("输入设备：\(audioInput)")
+                        }
+                        Text(summary.debugAudioPath == nil ? "调试录音：无" : "调试录音：有")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("尚无失败记录。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("导出诊断包") {
+                        appModel.exportDiagnosticsPackage()
+                    }
+                    Button("清空诊断日志", role: .destructive) {
+                        appModel.clearDiagnostics()
+                    }
+                }
+
+                Text(appModel.diagnosticStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
             Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -636,6 +684,13 @@ private struct PrivacySettingsView: View {
         Binding(
             get: { appModel.keepDebugRecordings },
             set: { appModel.updateKeepDebugRecordings($0) }
+        )
+    }
+
+    private var diagnosticAudioRetentionBinding: Binding<DiagnosticAudioRetentionPolicy> {
+        Binding(
+            get: { appModel.diagnosticAudioRetentionPolicy },
+            set: { appModel.updateDiagnosticAudioRetentionPolicy($0) }
         )
     }
 }

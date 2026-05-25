@@ -3,27 +3,44 @@ import Foundation
 
 final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
     private let engine = AVAudioEngine()
+    private let diagnosticsRecorder: DiagnosticsRecorder
     private let targetSampleRate: Double = 16_000
     private var targetFormat: AVAudioFormat?
     private var converter: AVAudioConverter?
     private var startDate: Date?
     private var samplesRecorded = 0
+    private var didLogFirstBuffer = false
     private var audioFile: AVAudioFile?
     private var recordingURL: URL?
     private var recordingError: Error?
     private var onSamples: (@Sendable ([Float], Double) -> Void)?
+
+    init(diagnosticsRecorder: DiagnosticsRecorder = DiagnosticsRecorder()) {
+        self.diagnosticsRecorder = diagnosticsRecorder
+    }
 
     func startStreaming(
         keepDebugFile: Bool,
         onSamples: @escaping @Sendable ([Float], Double) -> Void
     ) throws {
         if engine.isRunning {
+            diagnosticsRecorder.record(DiagnosticEvent(
+                category: .audio,
+                phase: "streaming_audio.stop_existing_engine",
+                audio: audioSnapshot(engineWasRunning: true)
+            ))
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
         }
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+        diagnosticsRecorder.record(DiagnosticEvent(
+            category: .audio,
+            phase: "streaming_audio.start_requested",
+            audio: audioSnapshot(inputFormat: inputFormat, engineWasRunning: engine.isRunning),
+            details: ["keepDebugFile": String(keepDebugFile)]
+        ))
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: targetSampleRate,
@@ -40,6 +57,7 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
         self.converter = converter
         self.onSamples = onSamples
         samplesRecorded = 0
+        didLogFirstBuffer = false
         recordingError = nil
         recordingURL = nil
         audioFile = nil
@@ -57,10 +75,24 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
         engine.prepare()
         try engine.start()
         startDate = Date()
+        diagnosticsRecorder.record(DiagnosticEvent(
+            category: .audio,
+            phase: "streaming_audio.started",
+            audio: audioSnapshot(inputFormat: inputFormat, engineWasRunning: engine.isRunning),
+            debugAudioPath: recordingURL?.path
+        ))
     }
 
     func stopStreaming() throws -> LiveRecordingSummary {
         guard engine.isRunning, let startDate else {
+            diagnosticsRecorder.record(DiagnosticEvent(
+                category: .audio,
+                phase: "streaming_audio.stop_failed",
+                error: TypeMoreError.recordingNotActive.localizedDescription,
+                audio: audioSnapshot(engineWasRunning: engine.isRunning),
+                samplesRecorded: samplesRecorded,
+                debugAudioPath: recordingURL?.path
+            ))
             throw TypeMoreError.recordingNotActive
         }
 
@@ -71,8 +103,23 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
         onSamples = nil
 
         if let recordingError {
+            diagnosticsRecorder.record(DiagnosticEvent(
+                category: .audio,
+                phase: "streaming_audio.recording_error",
+                error: recordingError.localizedDescription,
+                samplesRecorded: samplesRecorded,
+                debugAudioPath: recordingURL?.path
+            ))
             throw recordingError
         }
+
+        diagnosticsRecorder.record(DiagnosticEvent(
+            category: .audio,
+            phase: "streaming_audio.stopped",
+            durationMs: Int(Date().timeIntervalSince(startDate) * 1000),
+            samplesRecorded: samplesRecorded,
+            debugAudioPath: recordingURL?.path
+        ))
 
         return LiveRecordingSummary(
             fileURL: recordingURL,
@@ -85,12 +132,29 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
     private func handleIncomingBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let converted = convert(buffer) else { return }
         samplesRecorded += Int(converted.frameLength)
+        if !didLogFirstBuffer {
+            didLogFirstBuffer = true
+            diagnosticsRecorder.record(DiagnosticEvent(
+                category: .audio,
+                phase: "streaming_audio.first_buffer",
+                audio: audioSnapshot(inputFormat: buffer.format, engineWasRunning: engine.isRunning),
+                samplesRecorded: samplesRecorded,
+                debugAudioPath: recordingURL?.path
+            ))
+        }
 
         if let audioFile {
             do {
                 try audioFile.write(from: converted)
             } catch {
                 recordingError = error
+                diagnosticsRecorder.record(DiagnosticEvent(
+                    category: .audio,
+                    phase: "streaming_audio.write_failed",
+                    error: error.localizedDescription,
+                    samplesRecorded: samplesRecorded,
+                    debugAudioPath: recordingURL?.path
+                ))
             }
         }
 
@@ -139,5 +203,17 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
             try FileManager.default.removeItem(at: url)
         }
         return url
+    }
+
+    private func audioSnapshot(inputFormat: AVAudioFormat? = nil, engineWasRunning: Bool) -> DiagnosticAudioSnapshot {
+        let device = AVCaptureDevice.default(for: .audio)
+        let format = inputFormat ?? engine.inputNode.outputFormat(forBus: 0)
+        return DiagnosticAudioSnapshot(
+            inputName: device?.localizedName,
+            inputUID: device?.uniqueID,
+            sampleRate: format.sampleRate,
+            channelCount: Int(format.channelCount),
+            engineWasRunning: engineWasRunning
+        )
     }
 }

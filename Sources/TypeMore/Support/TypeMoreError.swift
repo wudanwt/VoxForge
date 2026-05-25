@@ -12,6 +12,7 @@ enum TypeMoreError: LocalizedError {
     case modelDownloadFailed(String)
     case recognitionBackendUnavailable(String)
     case operationTimedOut(String)
+    case diagnosticExportFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -37,6 +38,17 @@ enum TypeMoreError: LocalizedError {
             message
         case .operationTimedOut(let message):
             message
+        case .diagnosticExportFailed(let message):
+            "导出诊断包失败：\(message)"
         }
+    }
+}
+
+extension TypeMoreError {
+    var isOperationTimeout: Bool {
+        if case .operationTimedOut = self {
+            return true
+        }
+        return false
     }
 }

@@ -175,6 +175,18 @@ final class SettingsStore {
         set { defaults.set(newValue, forKey: "keepDebugRecordings") }
     }
 
+    var diagnosticAudioRetentionPolicy: DiagnosticAudioRetentionPolicy {
+        get {
+            guard let rawValue = defaults.string(forKey: "diagnosticAudioRetentionPolicy") else {
+                return .onFailure
+            }
+            return DiagnosticAudioRetentionPolicy(rawValue: rawValue) ?? .onFailure
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: "diagnosticAudioRetentionPolicy")
+        }
+    }
+
     var externalTriggerEnabled: Bool {
         get { defaults.bool(forKey: "externalTriggerEnabled") }
         set { defaults.set(newValue, forKey: "externalTriggerEnabled") }

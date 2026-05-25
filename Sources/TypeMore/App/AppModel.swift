@@ -33,6 +33,10 @@ final class AppModel {
     var llmPromptTemplateMode: DictationMode = .codingPrompt
     var llmAPIKey: String
     var keepDebugRecordings: Bool
+    var diagnosticAudioRetentionPolicy: DiagnosticAudioRetentionPolicy
+    var diagnosticStatusMessage = "诊断日志已就绪"
+    var recentDiagnosticFailureSummary: DiagnosticFailureSummary?
+    var lastDiagnosticPackageURL: URL?
     var whisperKitStreamingModel: String
     var autoSubmitAfterDictation = false
     var externalTriggerEnabled: Bool
@@ -56,6 +60,8 @@ final class AppModel {
     private let permissionCoordinator: PermissionCoordinator
     private let hotkeyCoordinator: HotkeyCoordinator
     private let externalTriggerService: ExternalTriggerService
+    private let diagnosticsRecorder: DiagnosticsRecorder
+    private let diagnosticPackageExporter: DiagnosticPackageExporter
     private let foregroundApplicationTracker = ForegroundApplicationTracker()
     private let sherpaModelManager: SherpaModelManager
     private var recordingStart: Date?
@@ -74,10 +80,11 @@ final class AppModel {
 
     init(
         audioRecorder: AudioRecordingService = AVAudioEngineRecordingService(),
-        streamingAudioRecorder: LiveAudioRecordingService = AVAudioEngineLiveRecordingService(),
         transcriptionEngine: TranscriptionEngine = WhisperKitTranscriptionEngine(),
         sherpaStreamingEngine: StreamingSpeechEngine? = nil,
+        streamingAudioRecorder: LiveAudioRecordingService? = nil,
         whisperKitStreamingEngine: StreamingSpeechEngine? = nil,
+        diagnosticsRecorder: DiagnosticsRecorder = DiagnosticsRecorder(),
         sherpaModelManager: SherpaModelManager = SherpaModelManager(),
         llmOptimizationService: LLMOptimizationService = OpenAICompatibleOptimizationService(),
         postProcessor: PostProcessingService = CodingPromptPostProcessor(),
@@ -86,7 +93,9 @@ final class AppModel {
         hotkeyCoordinator: HotkeyCoordinator = CarbonHotkeyCoordinator()
     ) {
         self.audioRecorder = audioRecorder
-        self.streamingAudioRecorder = streamingAudioRecorder
+        self.diagnosticsRecorder = diagnosticsRecorder
+        self.diagnosticPackageExporter = DiagnosticPackageExporter(recorder: diagnosticsRecorder)
+        self.streamingAudioRecorder = streamingAudioRecorder ?? AVAudioEngineLiveRecordingService(diagnosticsRecorder: diagnosticsRecorder)
         self.transcriptionEngine = transcriptionEngine
         self.sherpaModelManager = sherpaModelManager
         self.sherpaStreamingEngine = sherpaStreamingEngine ?? SherpaParaformerStreamingEngine(modelManager: sherpaModelManager)
@@ -121,6 +130,8 @@ final class AppModel {
         self.llmStyleInstruction = settingsStore.llmStyleInstruction
         self.llmCustomPrompt = settingsStore.llmCustomPrompt
         self.keepDebugRecordings = settingsStore.keepDebugRecordings
+        self.diagnosticAudioRetentionPolicy = settingsStore.diagnosticAudioRetentionPolicy
+        self.recentDiagnosticFailureSummary = diagnosticsRecorder.recentFailureSummary()
         self.whisperKitStreamingModel = persistedWhisperKitModel
         self.llmAPIKey = ""
         self.externalTriggerEnabled = settingsStore.externalTriggerEnabled
@@ -176,6 +187,10 @@ final class AppModel {
             return .generic
         }
         return profile(for: bundleID)
+    }
+
+    private var shouldCaptureDebugAudio: Bool {
+        keepDebugRecordings || diagnosticAudioRetentionPolicy != .never
     }
 
     func profile(for bundleIdentifier: String) -> AppProfile {
@@ -342,16 +357,43 @@ final class AppModel {
         let operationID = UUID()
         activeOperationID = operationID
         errorMessage = nil
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.start",
+            operationID: operationID,
+            message: "startDictation requested"
+        )
         transition(to: .processing, message: "正在检查麦克风权限")
+        recordDiagnostic(category: .dictation, phase: "permission.microphone.check", operationID: operationID)
         guard await permissionCoordinator.ensureMicrophonePermission() else {
             guard isActiveOperation(operationID) else { return }
             suppressAutomaticSherpaPrewarm(for: 8)
+            recordDiagnostic(
+                category: .dictation,
+                phase: "permission.microphone.denied",
+                operationID: operationID,
+                errorMessage: "microphone permission denied"
+            )
             fail("需要麦克风权限才能听写。")
             return
         }
         guard isActiveOperation(operationID) else { return }
+        recordDiagnostic(category: .dictation, phase: "permission.microphone.granted", operationID: operationID)
 
         lastTargetApplication = foregroundApplicationTracker.targetApplication()
+        recordDiagnostic(
+            category: .dictation,
+            phase: "target_app.resolved",
+            operationID: operationID,
+            targetApp: lastTargetApplication,
+            message: lastTargetApplication?.displayName
+        )
+        recordDiagnostic(
+            category: .dictation,
+            phase: "recognition_backend.selected",
+            operationID: operationID,
+            backend: recognitionBackend
+        )
 
         switch recognitionBackend {
         case .sherpaParaformer:
@@ -393,6 +435,7 @@ final class AppModel {
         }
 
         do {
+            recordDiagnostic(category: .audio, phase: "batch_audio.start_requested", operationID: operationID, backend: .whisperKit)
             try audioRecorder.startRecording()
             recordingStart = Date()
             activeDictationPath = .whisperKit
@@ -400,9 +443,11 @@ final class AppModel {
                 _ = try? audioRecorder.stopRecording()
                 return
             }
+            recordDiagnostic(category: .dictation, phase: "dictation.recording_started", operationID: operationID, backend: .whisperKit)
             transition(to: .recording, message: "正在听写：WhisperKit 兼容")
         } catch {
             guard isActiveOperation(operationID) else { return }
+            recordDiagnostic(category: .audio, phase: "batch_audio.start_failed", operationID: operationID, backend: .whisperKit, error: error)
             fail("无法开始录音：\(error.localizedDescription)")
         }
     }
@@ -440,8 +485,18 @@ final class AppModel {
             seconds: startupWatchdogTimeout(for: backend),
             failurePrefix: failurePrefix
         )
+        var startupPhase = "prepare"
         do {
             transition(to: .processing, message: preparingMessage)
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.prepare.start",
+                operationID: operationID,
+                backend: backend,
+                message: preparingMessage,
+                timeoutSeconds: prepareTimeout(for: backend)
+            )
+            let prepareStartedAt = Date()
             let state = try await withTimeout(
                 seconds: prepareTimeout(for: backend),
                 message: "\(failurePrefix)：准备阶段超时。请点“刷新状态”后重试；如果仍卡住，请重启 VoxForge 或切换识别引擎。"
@@ -458,11 +513,29 @@ final class AppModel {
                 await engine.cancel()
                 return
             }
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.prepare.success",
+                operationID: operationID,
+                backend: backend,
+                message: state.title,
+                durationMs: Int(Date().timeIntervalSince(prepareStartedAt) * 1000)
+            )
             speechModelState = state
             modelStatus = state.title
             activeDictationPath = ActiveDictationPath(backend: backend)
             transition(to: .processing, message: "正在创建\(backend.title)识别会话")
+            startupPhase = "start_session"
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.start_session.start",
+                operationID: operationID,
+                backend: backend,
+                message: "正在创建\(backend.title)识别会话",
+                timeoutSeconds: sessionStartupTimeout(for: backend)
+            )
 
+            let sessionStartedAt = Date()
             try await withTimeout(
                 seconds: sessionStartupTimeout(for: backend),
                 message: "\(failurePrefix)：创建识别会话超时。通常是 sherpa runtime 或模型加载卡住，请重试或重启 VoxForge。"
@@ -474,14 +547,29 @@ final class AppModel {
                     onPartial: { [weak self] partial in
                         Task { @MainActor in
                             guard self?.isActiveOperation(operationID) == true else { return }
+                            if self?.lastTranscript.isEmpty == true {
+                                self?.recordDiagnostic(
+                                    category: .recognition,
+                                    phase: "recognition.first_partial",
+                                    operationID: operationID,
+                                    backend: backend
+                                )
+                            }
                             self?.lastTranscript = partial
                             self?.hudController.show(state: .recording, message: "正在听写：实时识别中", preview: partial)
                         }
                     }
                 )
             }
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.start_session.success",
+                operationID: operationID,
+                backend: backend,
+                durationMs: Int(Date().timeIntervalSince(sessionStartedAt) * 1000)
+            )
 
-            try streamingAudioRecorder.startStreaming(keepDebugFile: keepDebugRecordings) { samples, sampleRate in
+            try streamingAudioRecorder.startStreaming(keepDebugFile: shouldCaptureDebugAudio) { samples, sampleRate in
                 Task {
                     await engine.acceptAudio(samples: samples, sampleRate: sampleRate)
                 }
@@ -493,10 +581,29 @@ final class AppModel {
             }
             recordingStart = Date()
             cancelStartupWatchdog()
+            recordDiagnostic(
+                category: .dictation,
+                phase: "dictation.recording_started",
+                operationID: operationID,
+                backend: backend
+            )
             transition(to: .recording, message: recordingMessage)
         } catch {
             guard isActiveOperation(operationID) else { return }
             cancelStartupWatchdog()
+            let timedOut = (error as? TypeMoreError)?.isOperationTimeout == true
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.\(startupPhase).failed",
+                operationID: operationID,
+                backend: backend,
+                error: error,
+                timeoutSeconds: timedOut ? (startupPhase == "prepare" ? prepareTimeout(for: backend) : sessionStartupTimeout(for: backend)) : nil,
+                details: [
+                    "willCancelEngine": "true",
+                    "willRebuildSherpa": String(backend == .sherpaParaformer)
+                ]
+            )
             cancelEngineAfterStartupFailure(engine, error: error)
             activeDictationPath = nil
             if backend == .sherpaParaformer {
@@ -510,14 +617,38 @@ final class AppModel {
 
     private func finishStreamingDictation(engine: StreamingSpeechEngine, operationID: UUID, finishMessage: String) async {
         transition(to: .processing, message: finishMessage, preview: lastTranscript)
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.finish.start",
+            operationID: operationID,
+            message: finishMessage
+        )
 
         do {
             let recording = try streamingAudioRecorder.stopStreaming()
+            recordDiagnostic(
+                category: .audio,
+                phase: "streaming_audio.summary",
+                operationID: operationID,
+                durationMs: Int(recording.duration * 1000),
+                samplesRecorded: recording.samplesRecorded,
+                debugAudioURL: recording.fileURL
+            )
             let result = try await engine.finish(recording: recording)
             guard isActiveOperation(operationID) else {
                 await engine.cancel()
                 return
             }
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.finish.success",
+                operationID: operationID,
+                backend: result.backend,
+                durationMs: Int(result.finalizationLatency * 1000),
+                samplesRecorded: recording.samplesRecorded,
+                debugAudioURL: result.debugAudioURL,
+                details: ["realTimeFactor": String(format: "%.2f", result.realTimeFactor)]
+            )
             activeDictationPath = nil
             modelStatus = performanceStatus(for: result)
             try await completeDictation(
@@ -531,6 +662,16 @@ final class AppModel {
             guard isActiveOperation(operationID) else { return }
             let wasSherpa = activeDictationPath == .sherpaParaformer
             activeDictationPath = nil
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.finish.failed",
+                operationID: operationID,
+                error: error,
+                details: [
+                    "willCancelEngine": "true",
+                    "willRebuildSherpa": String(wasSherpa)
+                ]
+            )
             await engine.cancel()
             if wasSherpa {
                 rebuildSherpaStreamingEngine()
@@ -541,9 +682,19 @@ final class AppModel {
 
     private func finishWhisperKitDictation(operationID: UUID) async {
         transition(to: .processing, message: "正在用 WhisperKit 本地转写")
+        recordDiagnostic(category: .dictation, phase: "dictation.finish.start", operationID: operationID, backend: .whisperKit, message: "正在用 WhisperKit 本地转写")
 
         do {
             let audio = try audioRecorder.stopRecording()
+            recordDiagnostic(
+                category: .audio,
+                phase: "batch_audio.summary",
+                operationID: operationID,
+                backend: .whisperKit,
+                durationMs: Int(audio.duration * 1000),
+                samplesRecorded: audio.samplesRecorded,
+                debugAudioURL: audio.fileURL
+            )
             let rawTranscript = try await transcriptionEngine.transcribe(
                 audio: audio,
                 mode: selectedMode,
@@ -562,12 +713,21 @@ final class AppModel {
         } catch {
             guard isActiveOperation(operationID) else { return }
             activeDictationPath = nil
+            recordDiagnostic(category: .recognition, phase: "recognition.finish.failed", operationID: operationID, backend: .whisperKit, error: error)
             fail("听写失败：\(error.localizedDescription)")
         }
     }
 
     private func completeDictation(rawTranscript: String, duration: TimeInterval, debugAudioURL: URL?, backend: RecognitionBackend, operationID: UUID) async throws {
         guard isActiveOperation(operationID) else { return }
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.postprocess.start",
+            operationID: operationID,
+            backend: backend,
+            durationMs: Int(duration * 1000),
+            debugAudioURL: debugAudioURL
+        )
         let targetApp = lastTargetApplication ?? RunningApplicationInfo.frontmost()
         let profile = profile(for: targetApp.bundleIdentifier)
         let processed = postProcessor.process(
@@ -594,6 +754,7 @@ final class AppModel {
                 optimizedWithLLM = true
             } catch {
                 guard isActiveOperation(operationID) else { return }
+                recordDiagnostic(category: .dictation, phase: "llm.optimize.failed", operationID: operationID, backend: backend, error: error)
                 statusMessage = "大模型优化失败，已使用本地结果：\(error.localizedDescription)"
                 hudController.show(state: .optimizing, message: "大模型优化失败，已使用本地结果", preview: processed)
             }
@@ -601,6 +762,14 @@ final class AppModel {
 
         lastTranscript = finalText
         autoSubmitAfterDictation = false
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.postprocess.success",
+            operationID: operationID,
+            backend: backend,
+            targetApp: targetApp,
+            debugAudioURL: debugAudioURL
+        )
 
         if targetApp.bundleIdentifier == Bundle.main.bundleIdentifier {
             saveTranscript(finalText, rawTranscript: rawTranscript, duration: duration, targetApp: targetApp, inserted: false, optimizedWithLLM: optimizedWithLLM)
@@ -645,6 +814,12 @@ final class AppModel {
             hudController.hide()
             return
         }
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.interrupt",
+            operationID: activeOperationID,
+            message: "user interrupt"
+        )
         cancelStartupWatchdog()
         activeOperationID = nil
         if activeDictationPath == .sherpaParaformer {
@@ -718,6 +893,46 @@ final class AppModel {
         activeOperationID == operationID
     }
 
+    private func recordDiagnostic(
+        category: DiagnosticEvent.Category,
+        phase: String,
+        operationID: UUID? = nil,
+        backend: RecognitionBackend? = nil,
+        targetApp: RunningApplicationInfo? = nil,
+        message: String? = nil,
+        error: Error? = nil,
+        errorMessage: String? = nil,
+        timeoutSeconds: TimeInterval? = nil,
+        durationMs: Int? = nil,
+        samplesRecorded: Int? = nil,
+        debugAudioURL: URL? = nil,
+        details: [String: String] = [:]
+    ) {
+        let event = DiagnosticEvent(
+            category: category,
+            phase: phase,
+            operationID: operationID?.uuidString,
+            backend: backend?.title ?? recognitionBackend.title,
+            mode: selectedMode.title,
+            language: transcriptionLanguage.title,
+            targetAppName: targetApp?.displayName ?? lastTargetApplication?.displayName,
+            targetBundleIdentifier: targetApp?.bundleIdentifier ?? lastTargetApplication?.bundleIdentifier,
+            sessionState: sessionState.rawValue,
+            activeDictationPath: activeDictationPath?.diagnosticName,
+            message: message,
+            error: errorMessage ?? error?.localizedDescription,
+            durationMs: durationMs,
+            timeoutSeconds: timeoutSeconds,
+            samplesRecorded: samplesRecorded,
+            debugAudioPath: debugAudioURL?.path,
+            details: details
+        )
+        diagnosticsRecorder.record(event)
+        if let summary = event.failureSummary {
+            recentDiagnosticFailureSummary = summary
+        }
+    }
+
     private func prepareTimeout(for backend: RecognitionBackend) -> TimeInterval {
         switch backend {
         case .sherpaParaformer:
@@ -761,11 +976,34 @@ final class AppModel {
                 else { return }
 
                 if backend == .sherpaParaformer {
+                    self.recordDiagnostic(
+                        category: .recognition,
+                        phase: "recognition.startup_watchdog.rebuild_sherpa",
+                        operationID: operationID,
+                        backend: backend,
+                        timeoutSeconds: seconds,
+                        details: [
+                            "willCancelEngine": "false",
+                            "willRebuildSherpa": "true"
+                        ]
+                    )
                     self.rebuildSherpaStreamingEngine()
                 }
                 self.activeDictationPath = nil
                 self.speechModelState = .failed("启动超时")
                 self.modelStatus = self.speechModelState.title
+                self.recordDiagnostic(
+                    category: .recognition,
+                    phase: "recognition.startup_watchdog.timeout",
+                    operationID: operationID,
+                    backend: backend,
+                    errorMessage: "\(failurePrefix)：启动超过 \(Int(seconds)) 秒仍未完成。",
+                    timeoutSeconds: seconds,
+                    details: [
+                        "willCancelEngine": "false",
+                        "willRebuildSherpa": String(backend == .sherpaParaformer)
+                    ]
+                )
                 self.fail("\(failurePrefix)：启动超过 \(Int(seconds)) 秒仍未完成。已重置中文极速引擎，请重试；如果仍频繁发生，请重启 VoxForge 或切换识别引擎。")
             }
         }
@@ -779,6 +1017,12 @@ final class AppModel {
     }
 
     private func cancelEngineAfterStartupFailure(_ engine: StreamingSpeechEngine, error: Error) {
+        recordDiagnostic(
+            category: .recognition,
+            phase: "recognition.engine_cancel.requested",
+            operationID: activeOperationID,
+            error: error
+        )
         if case TypeMoreError.operationTimedOut = error {
             Task { await engine.cancel() }
         } else {
@@ -787,6 +1031,12 @@ final class AppModel {
     }
 
     private func rebuildSherpaStreamingEngine() {
+        recordDiagnostic(
+            category: .recognition,
+            phase: "recognition.sherpa_engine.rebuild",
+            operationID: activeOperationID,
+            backend: .sherpaParaformer
+        )
         sherpaStreamingEngine = SherpaParaformerStreamingEngine(modelManager: sherpaModelManager)
     }
 
@@ -1074,6 +1324,49 @@ final class AppModel {
         settingsStore.keepDebugRecordings = enabled
     }
 
+    func updateDiagnosticAudioRetentionPolicy(_ policy: DiagnosticAudioRetentionPolicy) {
+        diagnosticAudioRetentionPolicy = policy
+        settingsStore.diagnosticAudioRetentionPolicy = policy
+    }
+
+    func exportDiagnosticsPackage() {
+        let audioURLs = diagnosticAudioURLsForExport()
+        let environment = DiagnosticEnvironment(
+            exportedAt: Date(),
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
+            buildVersion: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown",
+            operatingSystem: ProcessInfo.processInfo.operatingSystemVersionString,
+            recognitionBackend: recognitionBackend.title,
+            mode: selectedMode.title,
+            language: transcriptionLanguage.title,
+            modelStatus: modelStatus,
+            keepDebugRecordings: keepDebugRecordings,
+            audioRetentionPolicy: diagnosticAudioRetentionPolicy.rawValue,
+            recentFailure: diagnosticsRecorder.recentFailureSummary()
+        )
+
+        do {
+            let result = try diagnosticPackageExporter.exportPackage(environment: environment, audioFileURLs: audioURLs)
+            lastDiagnosticPackageURL = result.packageURL
+            diagnosticStatusMessage = "已导出诊断包：\(result.packageURL.path)（音频 \(result.includedAudioFiles) 个）"
+            recordDiagnostic(category: .diagnostics, phase: "diagnostics.export.success", message: result.packageURL.path)
+        } catch {
+            diagnosticStatusMessage = "导出诊断包失败：\(error.localizedDescription)"
+            recordDiagnostic(category: .diagnostics, phase: "diagnostics.export.failed", error: error)
+        }
+    }
+
+    func clearDiagnostics() {
+        do {
+            try diagnosticsRecorder.clear()
+            recentDiagnosticFailureSummary = nil
+            lastDiagnosticPackageURL = nil
+            diagnosticStatusMessage = "诊断日志已清空"
+        } catch {
+            diagnosticStatusMessage = "清空诊断日志失败：\(error.localizedDescription)"
+        }
+    }
+
     func updateExternalTriggerEnabled(_ enabled: Bool) {
         externalTriggerEnabled = enabled
         settingsStore.externalTriggerEnabled = enabled
@@ -1177,6 +1470,13 @@ final class AppModel {
     private func transition(to state: DictationSessionState, message: String, preview: String? = nil) {
         sessionState = state
         statusMessage = message
+        recordDiagnostic(
+            category: .dictation,
+            phase: "state.transition",
+            operationID: activeOperationID,
+            message: message,
+            details: ["newState": state.rawValue]
+        )
         if state == .idle || state == .readyToSubmit || state == .inserting {
             return
         }
@@ -1184,13 +1484,35 @@ final class AppModel {
     }
 
     private func cleanupRecordingIfNeeded(_ audioURL: URL) {
-        guard !keepDebugRecordings else { return }
+        guard !keepDebugRecordings, diagnosticAudioRetentionPolicy != .always else { return }
         try? FileManager.default.removeItem(at: audioURL)
     }
 
     private func cleanupDebugAudioIfNeeded(_ audioURL: URL?) {
-        guard let audioURL, !keepDebugRecordings else { return }
+        guard let audioURL, !keepDebugRecordings, diagnosticAudioRetentionPolicy != .always else { return }
         try? FileManager.default.removeItem(at: audioURL)
+    }
+
+    private func diagnosticAudioURLsForExport() -> [URL] {
+        var urls: [URL] = []
+        if let path = diagnosticsRecorder.recentFailureSummary()?.debugAudioPath {
+            urls.append(URL(fileURLWithPath: path))
+        }
+
+        let recordingsDirectory = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("TypeMore/Recordings", isDirectory: true)
+        if let files = try? FileManager.default.contentsOfDirectory(at: recordingsDirectory, includingPropertiesForKeys: nil) {
+            urls.append(contentsOf: files.filter { $0.pathExtension.lowercased() == "wav" })
+        }
+
+        var seen = Set<String>()
+        return urls.filter { url in
+            guard FileManager.default.fileExists(atPath: url.path), !seen.contains(url.path) else { return false }
+            seen.insert(url.path)
+            return true
+        }
     }
 
     private func performanceStatus(for result: StreamingTranscriptionResult) -> String {
@@ -1201,6 +1523,12 @@ final class AppModel {
     }
 
     private func fail(_ message: String) {
+        recordDiagnostic(
+            category: .dictation,
+            phase: "dictation.fail",
+            operationID: activeOperationID,
+            errorMessage: message
+        )
         activeOperationID = nil
         sessionState = .failed
         errorMessage = message
@@ -1225,6 +1553,19 @@ private enum ActiveDictationPath {
             self = .appleDictation
         case .whisperKit:
             self = .whisperKit
+        }
+    }
+
+    var diagnosticName: String {
+        switch self {
+        case .sherpaParaformer:
+            "sherpaParaformer"
+        case .whisperKitStreaming:
+            "whisperKitStreaming"
+        case .appleDictation:
+            "appleDictation"
+        case .whisperKit:
+            "whisperKit"
         }
     }
 }
