@@ -16,6 +16,7 @@ final class AppModel {
     var recognitionBackend: RecognitionBackend
     var speechModelState: SpeechModelState = .unchecked
     var saveHistory = true
+    var historyRetention: HistoryRetention = .forever
     var launchAtLogin = false
     var modelStatus = "中文极速模型尚未检查"
     var errorMessage: String?
@@ -38,7 +39,6 @@ final class AppModel {
     var recentDiagnosticFailureSummary: DiagnosticFailureSummary?
     var lastDiagnosticPackageURL: URL?
     var whisperKitStreamingModel: String
-    var autoSubmitAfterDictation = false
     var externalTriggerEnabled: Bool
     var externalTriggerVendorID: Int
     var externalTriggerProductID: Int
@@ -52,8 +52,8 @@ final class AppModel {
     private var streamingAudioRecorder: LiveAudioRecordingService
     private let transcriptionEngine: TranscriptionEngine
     private var sherpaStreamingEngine: StreamingSpeechEngine
-    private let whisperKitStreamingEngine: StreamingSpeechEngine
-    private let appleSpeechAnalyzerEngine: StreamingSpeechEngine?
+    private var whisperKitStreamingEngine: StreamingSpeechEngine
+    private var appleSpeechAnalyzerEngine: StreamingSpeechEngine?
     private let llmOptimizationService: LLMOptimizationService
     private let postProcessor: PostProcessingService
     private let textInsertionService: TextInsertionService
@@ -66,7 +66,7 @@ final class AppModel {
     private let sherpaModelManager: SherpaModelManager
     private var recordingStart: Date?
     private var activeDictationPath: ActiveDictationPath?
-    private let historyStore = HistoryStore()
+    private let historyStore: HistoryStore
     private let settingsStore = SettingsStore()
     private let keychainStore = KeychainStore()
     private let hudController = DictationHUDController()
@@ -74,6 +74,8 @@ final class AppModel {
     private var startupWatchdog: DispatchWorkItem?
     private var audioStartupWatchdog: DispatchWorkItem?
     private var lastAudioBufferOperationID: UUID?
+    private var audioBufferContinuation: AsyncStream<AudioBuffer>.Continuation?
+    private var audioBufferConsumerTask: Task<Void, Never>?
     private var sherpaPrewarmTask: Task<Void, Never>?
     private var deferredSherpaPrewarmTask: Task<Void, Never>?
     private var didStartAppServices = false
@@ -97,6 +99,7 @@ final class AppModel {
         self.audioRecorder = audioRecorder
         self.diagnosticsRecorder = diagnosticsRecorder
         self.diagnosticPackageExporter = DiagnosticPackageExporter(recorder: diagnosticsRecorder)
+        self.historyStore = HistoryStore(diagnosticsRecorder: diagnosticsRecorder)
         self.streamingAudioRecorder = streamingAudioRecorder ?? AVAudioEngineLiveRecordingService(diagnosticsRecorder: diagnosticsRecorder)
         self.transcriptionEngine = transcriptionEngine
         self.sherpaModelManager = sherpaModelManager
@@ -115,7 +118,10 @@ final class AppModel {
         self.hotkeyCoordinator = hotkeyCoordinator
         self.dictationHotkey = settingsStore.dictationHotkey
         self.returnHotkey = settingsStore.returnHotkey
+        self.cancelHotkey = settingsStore.cancelHotkey
         self.saveHistory = settingsStore.saveHistory
+        let persistedHistoryRetention = settingsStore.historyRetention
+        self.historyRetention = persistedHistoryRetention
         self.selectedMode = settingsStore.selectedMode
         self.transcriptionLanguage = settingsStore.transcriptionLanguage
         let persistedBackend = settingsStore.recognitionBackend
@@ -124,7 +130,10 @@ final class AppModel {
         self.speechModelState = initialSpeechModelState
         self.modelStatus = initialSpeechModelState.title
         self.accessibilityPermissionGranted = permissionCoordinator.hasAccessibilityPermission
-        self.transcriptRecords = historyStore.load()
+        self.transcriptRecords = historyStore.load(retention: persistedHistoryRetention)
+        if let corruptURL = historyStore.lastRecoveredCorruptFileURL {
+            self.statusMessage = "历史记录文件已损坏，已保留为 \(corruptURL.lastPathComponent)"
+        }
         self.personalDictionary = settingsStore.personalDictionary
         self.llmOptimizationEnabled = settingsStore.llmOptimizationEnabled
         self.llmBaseURL = settingsStore.llmBaseURL
@@ -199,7 +208,8 @@ final class AppModel {
         appProfiles.first { $0.bundleIdentifier == bundleIdentifier } ?? .generic
     }
 
-    func configureHotkeysIfNeeded() {
+    @discardableResult
+    func configureHotkeysIfNeeded() -> [HotkeyRegistrationResult] {
         let results = hotkeyCoordinator.registerHotkeys(
             dictationHotkey: dictationHotkey,
             returnHotkey: returnHotkey,
@@ -215,6 +225,7 @@ final class AppModel {
             }
         )
         hotkeyStatusMessage = HotkeyRegistrationResult.message(for: results)
+        return results
     }
 
     func startAppServicesAfterLaunch() {
@@ -349,8 +360,10 @@ final class AppModel {
             await finishDictation()
         case .readyToSubmit:
             sendReturn()
-        case .processing, .optimizing, .inserting:
+        case .processing, .optimizing:
             interruptCurrentFlow()
+        case .inserting:
+            return
         }
     }
 
@@ -581,17 +594,52 @@ final class AppModel {
                 message: "正在启动麦克风输入"
             )
             lastAudioBufferOperationID = nil
-            try streamingAudioRecorder.startStreaming(keepDebugFile: shouldCaptureDebugAudio) { samples, sampleRate in
-                Task {
-                    await MainActor.run {
-                        self.lastAudioBufferOperationID = operationID
-                        self.cancelAudioStartupWatchdog()
+            var streamContinuation: AsyncStream<AudioBuffer>.Continuation?
+            let audioStream = AsyncStream<AudioBuffer> { continuation in
+                streamContinuation = continuation
+            }
+            audioBufferContinuation = streamContinuation
+            audioBufferConsumerTask = Task { [weak self] in
+                var didReceiveFirstBuffer = false
+                for await buffer in audioStream {
+                    if !didReceiveFirstBuffer {
+                        didReceiveFirstBuffer = true
+                        await MainActor.run {
+                            guard self?.isActiveOperation(operationID) == true else { return }
+                            self?.lastAudioBufferOperationID = operationID
+                            self?.cancelAudioStartupWatchdog()
+                        }
                     }
-                    await engine.acceptAudio(samples: samples, sampleRate: sampleRate)
+                    await engine.acceptAudio(samples: buffer.samples, sampleRate: buffer.sampleRate)
+                }
+            }
+            let audioContinuation = streamContinuation
+            try streamingAudioRecorder.startStreaming(keepDebugFile: shouldCaptureDebugAudio) { samples, sampleRate in
+                audioContinuation?.yield(AudioBuffer(samples: samples, sampleRate: sampleRate))
+            } onStreamInterrupted: { error in
+                Task { @MainActor in
+                    guard self.isActiveOperation(operationID),
+                          self.activeDictationPath == ActiveDictationPath(backend: backend)
+                    else { return }
+                    self.recordDiagnostic(
+                        category: .audio,
+                        phase: "streaming_audio.interrupted",
+                        operationID: operationID,
+                        backend: backend,
+                        error: error
+                    )
+                    _ = try? self.streamingAudioRecorder.stopStreaming()
+                    self.cancelAudioStartupWatchdog()
+                    self.cancelAudioBufferForwarding()
+                    await engine.cancel()
+                    self.activeDictationPath = nil
+                    self.rebuildStreamingEngine(for: backend)
+                    self.fail("音频输入设备已变化，听写已停止，请重试。")
                 }
             }
             guard isActiveOperation(operationID) else {
                 _ = try? streamingAudioRecorder.stopStreaming()
+                cancelAudioBufferForwarding()
                 await engine.cancel()
                 return
             }
@@ -619,14 +667,12 @@ final class AppModel {
                 timeoutSeconds: timedOut ? (startupPhase == "prepare" ? prepareTimeout(for: backend) : sessionStartupTimeout(for: backend)) : nil,
                 details: [
                     "willCancelEngine": "true",
-                    "willRebuildSherpa": String(backend == .sherpaParaformer)
+                    "willRebuildEngine": String(backend.isStreaming)
                 ]
             )
             cancelEngineAfterStartupFailure(engine, error: error)
             activeDictationPath = nil
-            if backend == .sherpaParaformer {
-                rebuildSherpaStreamingEngine()
-            }
+            rebuildStreamingEngine(for: backend)
             speechModelState = .failed(error.localizedDescription)
             modelStatus = speechModelState.title
             fail("\(error.localizedDescription)。当前设置为 \(backend.title)，不会自动切换其他识别引擎。")
@@ -645,6 +691,7 @@ final class AppModel {
 
         do {
             let recording = try streamingAudioRecorder.stopStreaming()
+            await finishAudioBufferForwarding()
             recordDiagnostic(
                 category: .audio,
                 phase: "streaming_audio.summary",
@@ -679,7 +726,8 @@ final class AppModel {
             )
         } catch {
             guard isActiveOperation(operationID) else { return }
-            let wasSherpa = activeDictationPath == .sherpaParaformer
+            cancelAudioBufferForwarding()
+            let failedPath = activeDictationPath
             activeDictationPath = nil
             recordDiagnostic(
                 category: .recognition,
@@ -688,12 +736,12 @@ final class AppModel {
                 error: error,
                 details: [
                     "willCancelEngine": "true",
-                    "willRebuildSherpa": String(wasSherpa)
+                    "willRebuildEngine": String(failedPath != nil)
                 ]
             )
             await engine.cancel()
-            if wasSherpa {
-                rebuildSherpaStreamingEngine()
+            if let failedPath {
+                rebuildStreamingEngine(for: failedPath.backend)
             }
             fail("听写失败：\(error.localizedDescription)")
         }
@@ -809,7 +857,6 @@ final class AppModel {
         }
 
         lastTranscript = finalText
-        autoSubmitAfterDictation = false
         recordDiagnostic(
             category: .dictation,
             phase: "dictation.postprocess.success",
@@ -838,19 +885,23 @@ final class AppModel {
 
         hudController.hide()
         transition(to: .inserting, message: "正在输入到 \(targetApp.displayName)", preview: finalText)
-        try await textInsertionService.insert(finalText, targetBundleIdentifier: targetApp.bundleIdentifier)
+        do {
+            try await textInsertionService.insert(finalText, targetBundleIdentifier: targetApp.bundleIdentifier)
+        } catch TypeMoreError.targetActivationFailed {
+            guard isActiveOperation(operationID) else { return }
+            saveTranscript(finalText, rawTranscript: rawTranscript, duration: duration, targetApp: targetApp, inserted: false, optimizedWithLLM: optimizedWithLLM)
+            cleanupDebugAudioIfNeeded(debugAudioURL)
+            activeOperationID = nil
+            transition(to: .failed, message: "目标应用未能激活，文本已保留在剪贴板。", preview: finalText)
+            hudController.showCompletion(message: "目标应用未能激活，文本已在剪贴板", preview: finalText)
+            return
+        }
         guard isActiveOperation(operationID) else { return }
         saveTranscript(finalText, rawTranscript: rawTranscript, duration: duration, targetApp: targetApp, inserted: true, optimizedWithLLM: optimizedWithLLM)
         cleanupDebugAudioIfNeeded(debugAudioURL)
 
-        if autoSubmitAfterDictation {
-            sendReturn()
-        } else {
-            transition(to: .readyToSubmit, message: "已输入到 \(targetApp.displayName)。再次按听写快捷键发送回车。", preview: finalText)
-            if NSApp.isActive && !NSApp.isHidden {
-                hudController.showReadyToSubmit(message: "已输入，下一次按键发送")
-            }
-        }
+        transition(to: .readyToSubmit, message: "已输入到 \(targetApp.displayName)。再次按听写快捷键发送回车。", preview: finalText)
+        hudController.showReadyToSubmit(message: "已输入到 \(targetApp.displayName)，再按一次发送回车")
     }
 
     func cancelDictation() {
@@ -862,6 +913,7 @@ final class AppModel {
             hudController.hide()
             return
         }
+        guard sessionState != .inserting else { return }
         recordDiagnostic(
             category: .dictation,
             phase: "dictation.interrupt",
@@ -870,6 +922,7 @@ final class AppModel {
         )
         cancelStartupWatchdog()
         cancelAudioStartupWatchdog()
+        cancelAudioBufferForwarding()
         activeOperationID = nil
         if activeDictationPath == .sherpaParaformer {
             _ = try? streamingAudioRecorder.stopStreaming()
@@ -898,7 +951,6 @@ final class AppModel {
 
             do {
                 try await textInsertionService.sendReturn(targetBundleIdentifier: targetApp.bundleIdentifier)
-                autoSubmitAfterDictation = false
                 activeOperationID = nil
                 lastTargetApplication = nil
                 let message = targetApp.bundleIdentifier == RunningApplicationInfo.generic.bundleIdentifier
@@ -1111,6 +1163,20 @@ final class AppModel {
         audioStartupWatchdog = nil
     }
 
+    private func finishAudioBufferForwarding() async {
+        audioBufferContinuation?.finish()
+        audioBufferContinuation = nil
+        await audioBufferConsumerTask?.value
+        audioBufferConsumerTask = nil
+    }
+
+    private func cancelAudioBufferForwarding() {
+        audioBufferContinuation?.finish()
+        audioBufferContinuation = nil
+        audioBufferConsumerTask?.cancel()
+        audioBufferConsumerTask = nil
+    }
+
     private func cancelEngineAfterStartupFailure(_ engine: StreamingSpeechEngine, error: Error) {
         recordDiagnostic(
             category: .recognition,
@@ -1118,11 +1184,7 @@ final class AppModel {
             operationID: activeOperationID,
             error: error
         )
-        if case TypeMoreError.operationTimedOut = error {
-            Task { await engine.cancel() }
-        } else {
-            Task { await engine.cancel() }
-        }
+        Task { await engine.cancel() }
     }
 
     private func rebuildSherpaStreamingEngine() {
@@ -1135,53 +1197,32 @@ final class AppModel {
         sherpaStreamingEngine = SherpaParaformerStreamingEngine(modelManager: sherpaModelManager)
     }
 
-    private func withTimeout<T>(
-        seconds: TimeInterval,
-        message: String,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        let task = Task {
-            try await operation()
-        }
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let lock = NSLock()
-                var didResume = false
-
-                func resume(_ result: Result<T, Error>) {
-                    lock.lock()
-                    guard !didResume else {
-                        lock.unlock()
-                        return
-                    }
-                    didResume = true
-                    lock.unlock()
-
-                    switch result {
-                    case .success(let value):
-                        continuation.resume(returning: value)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-
-                Task {
-                    do {
-                        resume(.success(try await task.value))
-                    } catch {
-                        resume(.failure(error))
-                    }
-                }
-
-                Task {
-                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                    task.cancel()
-                    resume(.failure(TypeMoreError.operationTimedOut(message)))
-                }
+    private func rebuildStreamingEngine(for backend: RecognitionBackend) {
+        switch backend {
+        case .sherpaParaformer:
+            rebuildSherpaStreamingEngine()
+        case .whisperKitStreaming:
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.whisperkit_streaming_engine.rebuild",
+                operationID: activeOperationID,
+                backend: .whisperKitStreaming
+            )
+            whisperKitStreamingEngine = WhisperKitStreamingEngine(modelName: whisperKitStreamingModel)
+        case .appleDictation:
+            recordDiagnostic(
+                category: .recognition,
+                phase: "recognition.apple_speech_engine.rebuild",
+                operationID: activeOperationID,
+                backend: .appleDictation
+            )
+            if #available(macOS 26.0, *) {
+                appleSpeechAnalyzerEngine = AppleSpeechAnalyzerStreamingEngine()
+            } else {
+                appleSpeechAnalyzerEngine = nil
             }
-        } onCancel: {
-            task.cancel()
+        case .whisperKit:
+            break
         }
     }
 
@@ -1224,7 +1265,7 @@ final class AppModel {
 
     func clearHistory() {
         transcriptRecords = []
-        historyStore.save([])
+        historyStore.save([], retention: historyRetention)
         statusMessage = "历史记录已清空"
     }
 
@@ -1252,17 +1293,37 @@ final class AppModel {
     }
 
     func updateHotkey(_ target: HotkeyTarget, to hotkey: HotkeyDefinition) {
+        let oldDictationHotkey = dictationHotkey
+        let oldReturnHotkey = returnHotkey
+        let oldCancelHotkey = cancelHotkey
+
         switch target {
         case .dictation:
             dictationHotkey = hotkey
-            settingsStore.dictationHotkey = hotkey
         case .returnKey:
             returnHotkey = hotkey
-            settingsStore.returnHotkey = hotkey
         case .cancel:
             cancelHotkey = hotkey
         }
-        configureHotkeysIfNeeded()
+        let results = configureHotkeysIfNeeded()
+        let targetResult = results.first { $0.target == target }
+        guard targetResult?.succeeded ?? true else {
+            dictationHotkey = oldDictationHotkey
+            returnHotkey = oldReturnHotkey
+            cancelHotkey = oldCancelHotkey
+            _ = configureHotkeysIfNeeded()
+            hotkeyStatusMessage = "快捷键注册失败，已保留原设置：\(HotkeyRegistrationResult.message(for: results))"
+            return
+        }
+
+        switch target {
+        case .dictation:
+            settingsStore.dictationHotkey = hotkey
+        case .returnKey:
+            settingsStore.returnHotkey = hotkey
+        case .cancel:
+            settingsStore.cancelHotkey = hotkey
+        }
     }
 
     func updateSelectedMode(_ mode: DictationMode) {
@@ -1338,6 +1399,13 @@ final class AppModel {
     func updateSaveHistory(_ enabled: Bool) {
         saveHistory = enabled
         settingsStore.saveHistory = enabled
+    }
+
+    func updateHistoryRetention(_ retention: HistoryRetention) {
+        historyRetention = retention
+        settingsStore.historyRetention = retention
+        transcriptRecords = historyStore.load(retention: retention)
+        historyStore.save(transcriptRecords, retention: retention)
     }
 
     func updateLLMOptimizationEnabled(_ enabled: Bool) {
@@ -1515,23 +1583,6 @@ final class AppModel {
             $0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         personalDictionary = sanitized + draftEntries
-        refreshSherpaRecognizerAfterDictionaryChange()
-    }
-
-    private func refreshSherpaRecognizerAfterDictionaryChange() {
-        guard recognitionBackend == .sherpaParaformer else { return }
-        guard sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
-        sherpaPrewarmTask?.cancel()
-        sherpaPrewarmTask = nil
-        Task { [weak self] in
-            guard let self else { return }
-            if let sherpaEngine = self.sherpaStreamingEngine as? SherpaParaformerStreamingEngine {
-                await sherpaEngine.invalidatePreparedRecognizer()
-            }
-            await MainActor.run {
-                self.scheduleDeferredSherpaPrewarm(reason: "词典已更新", delay: 1.0)
-            }
-        }
     }
 
     var llmConfiguration: LLMOptimizationConfiguration {
@@ -1559,7 +1610,10 @@ final class AppModel {
             optimizedWithLLM: optimizedWithLLM
         )
         transcriptRecords.insert(record, at: 0)
-        historyStore.save(transcriptRecords)
+        transcriptRecords = Array(transcriptRecords.filter { record in
+            historyRetention.cutoffDate.map { record.createdAt >= $0 } ?? true
+        }.prefix(200))
+        historyStore.save(transcriptRecords, retention: historyRetention)
     }
 
     private func transition(to state: DictationSessionState, message: String, preview: String? = nil) {
@@ -1649,4 +1703,22 @@ private enum ActiveDictationPath: Equatable {
             "whisperKit"
         }
     }
+
+    var backend: RecognitionBackend {
+        switch self {
+        case .sherpaParaformer:
+            .sherpaParaformer
+        case .whisperKitStreaming:
+            .whisperKitStreaming
+        case .appleDictation:
+            .appleDictation
+        case .whisperKit:
+            .whisperKit
+        }
+    }
+}
+
+private struct AudioBuffer: Sendable {
+    var samples: [Float]
+    var sampleRate: Double
 }

@@ -55,16 +55,58 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
             throw LLMOptimizationError.badStatus(httpResponse.statusCode)
         }
 
-        let optimized = try Self.extractOptimizedText(from: data)
-        return optimized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try Self.extractOptimizedText(from: data)
     }
 
     static func extractOptimizedText(from data: Data) throws -> String {
         let decoded = try JSONDecoder().decode(ChatCompletionsResponse.self, from: data)
-        guard let text = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+        guard let rawText = decoded.choices.first?.message.content else {
             throw LLMOptimizationError.emptyResponse
         }
+        let text = sanitizeLLMResponse(rawText)
+        guard !text.isEmpty else { throw LLMOptimizationError.emptyResponse }
         return text
+    }
+
+    static func sanitizeLLMResponse(_ text: String) -> String {
+        var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        output = stripSingleMarkdownFence(output)
+        output = stripExplanatoryPreamble(output)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func stripSingleMarkdownFence(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("```"), trimmed.hasSuffix("```") else { return text }
+
+        let lines = trimmed.components(separatedBy: .newlines)
+        guard lines.count >= 2,
+              lines.first?.hasPrefix("```") == true,
+              lines.last?.trimmingCharacters(in: .whitespacesAndNewlines) == "```"
+        else {
+            return text
+        }
+
+        let inner = lines.dropFirst().dropLast().joined(separator: "\n")
+        guard !inner.contains("```") else { return text }
+        return inner
+    }
+
+    private static func stripExplanatoryPreamble(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        guard lines.count > 1, let first = lines.first else { return text }
+        let trimmedFirst = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isExplanatoryPreamble(trimmedFirst) else { return text }
+        return lines.dropFirst().joined(separator: "\n")
+    }
+
+    private static func isExplanatoryPreamble(_ line: String) -> Bool {
+        guard line.hasSuffix("：") || line.hasSuffix(":") else { return false }
+        let prefixes = [
+            "好的", "以下是", "下面是", "优化后的文本是", "优化结果",
+            "Here is", "Here are", "Here's", "The optimized text is"
+        ]
+        return prefixes.contains { line.localizedCaseInsensitiveContains($0) && line.hasPrefix($0) }
     }
 
     private func chatCompletionsURL(from baseURLString: String) throws -> URL {

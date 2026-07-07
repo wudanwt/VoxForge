@@ -40,8 +40,8 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         self.runtimeURL = runtimeURL
         let paths = try await modelManager.ensureModel(progress: progress)
         modelPaths = paths
-        let hotwordsURL = try hotwordsStore.writeHotwords(dictionary: dictionary)
-        let signature = hotwordSignature(dictionary)
+        let hotwordsURL = try hotwordsStore.writeBuiltinHotwords()
+        let signature = hotwordSignature()
         let preparedRecognizer: SherpaOnnxRecognizer
         if let task = recognizerPreparationTask {
             preparedRecognizer = try await task.value
@@ -85,7 +85,7 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
             _ = try await prepare(dictionary: dictionary) { _ in }
             activeRecognizer = try recognizer.unwrap(or: TypeMoreError.recognitionBackendUnavailable("中文极速 recognizer 尚未就绪。"))
         }
-        if recognizerSignature != hotwordSignature(dictionary) {
+        if recognizerSignature != hotwordSignature() {
             // Keep the current recognizer for stability; updated hotwords take effect after refresh/restart.
         }
         let createdSession = try activeRecognizer.createStreamSession()
@@ -198,59 +198,10 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         }
     }
 
-    private func hotwordSignature(_: [DictionaryEntry]) -> String {
+    private func hotwordSignature() -> String {
         ""
     }
 
-    private nonisolated func withTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        message: String,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        let task = Task {
-            try await operation()
-        }
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                let lock = NSLock()
-                var didResume = false
-
-                func resume(_ result: Result<T, Error>) {
-                    lock.lock()
-                    guard !didResume else {
-                        lock.unlock()
-                        return
-                    }
-                    didResume = true
-                    lock.unlock()
-
-                    switch result {
-                    case .success(let value):
-                        continuation.resume(returning: value)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-
-                Task {
-                    do {
-                        resume(.success(try await task.value))
-                    } catch {
-                        resume(.failure(error))
-                    }
-                }
-
-                Task {
-                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                    task.cancel()
-                    resume(.failure(TypeMoreError.operationTimedOut(message)))
-                }
-            }
-        } onCancel: {
-            task.cancel()
-        }
-    }
 }
 
 private extension Optional {

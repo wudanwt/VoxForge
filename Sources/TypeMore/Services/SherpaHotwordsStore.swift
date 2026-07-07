@@ -7,19 +7,18 @@ final class SherpaHotwordsStore {
         self.fileManager = fileManager
     }
 
-    func writeHotwords(dictionary: [DictionaryEntry]) throws -> URL? {
-        let words = hotwords(from: dictionary)
+    func writeBuiltinHotwords() throws -> URL? {
+        let words = builtinHotwords()
         guard !words.isEmpty else { return nil }
 
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let directory = appSupport.appendingPathComponent("TypeMore/SherpaRuntime", isDirectory: true)
+        let directory = AppDirectories.applicationSupport(fileManager: fileManager, appending: "TypeMore/SherpaRuntime")
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("hotwords.txt")
         try words.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
         return url
     }
 
-    private func hotwords(from _: [DictionaryEntry]) -> [String] {
+    private func builtinHotwords() -> [String] {
         let codingWords = [
             "SwiftUI",
             "Xcode",

@@ -17,6 +17,11 @@ final class SettingsStore {
         set { setHotkey(newValue, forKey: "returnHotkey") }
     }
 
+    var cancelHotkey: HotkeyDefinition {
+        get { hotkey(forKey: "cancelHotkey", fallback: .defaultCancel) }
+        set { setHotkey(newValue, forKey: "cancelHotkey") }
+    }
+
     var selectedMode: DictationMode {
         get {
             guard let rawValue = defaults.string(forKey: "selectedMode") else { return .codingPrompt }
@@ -64,6 +69,16 @@ final class SettingsStore {
         }
         set {
             defaults.set(newValue, forKey: "saveHistory")
+        }
+    }
+
+    var historyRetention: HistoryRetention {
+        get {
+            guard let rawValue = defaults.string(forKey: "historyRetention") else { return .forever }
+            return HistoryRetention(rawValue: rawValue) ?? .forever
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: "historyRetention")
         }
     }
 

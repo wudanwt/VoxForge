@@ -15,7 +15,8 @@ protocol AudioRecordingService {
 protocol LiveAudioRecordingService {
     func startStreaming(
         keepDebugFile: Bool,
-        onSamples: @escaping @Sendable ([Float], Double) -> Void
+        onSamples: @escaping @Sendable ([Float], Double) -> Void,
+        onStreamInterrupted: @escaping @Sendable (Error) -> Void
     ) throws
     func stopStreaming() throws -> LiveRecordingSummary
 }

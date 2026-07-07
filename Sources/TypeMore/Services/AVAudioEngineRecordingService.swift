@@ -3,6 +3,7 @@ import Foundation
 
 final class AVAudioEngineRecordingService: AudioRecordingService {
     private let engine = AVAudioEngine()
+    private let audioStateQueue = DispatchQueue(label: "VoxForge.AVAudioEngineRecordingService.state")
     private var startDate: Date?
     private var sampleRate: Double = 0
     private var samplesRecorded = 0
@@ -20,55 +21,66 @@ final class AVAudioEngineRecordingService: AudioRecordingService {
         let format = input.outputFormat(forBus: 0)
         let fileURL = try makeRecordingURL()
         let settings = format.settings
-        audioFile = try AVAudioFile(forWriting: fileURL, settings: settings)
-        recordingURL = fileURL
-        recordingError = nil
-        sampleRate = format.sampleRate
-        samplesRecorded = 0
+        let newAudioFile = try AVAudioFile(forWriting: fileURL, settings: settings)
+        audioStateQueue.sync {
+            audioFile = newAudioFile
+            recordingURL = fileURL
+            recordingError = nil
+            sampleRate = format.sampleRate
+            samplesRecorded = 0
+        }
 
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.samplesRecorded += Int(buffer.frameLength)
-            do {
-                try self.audioFile?.write(from: buffer)
-            } catch {
-                self.recordingError = error
+            self?.audioStateQueue.async { [weak self] in
+                guard let self else { return }
+                self.samplesRecorded += Int(buffer.frameLength)
+                do {
+                    try self.audioFile?.write(from: buffer)
+                } catch {
+                    self.recordingError = error
+                }
             }
         }
 
         engine.prepare()
         try engine.start()
-        startDate = Date()
+        let startedAt = Date()
+        audioStateQueue.sync {
+            startDate = startedAt
+        }
     }
 
     func stopRecording() throws -> RecordedAudio {
-        guard engine.isRunning, let startDate else {
+        let currentStartDate = audioStateQueue.sync { startDate }
+        guard engine.isRunning, let currentStartDate else {
             throw TypeMoreError.recordingNotActive
         }
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        audioFile = nil
 
-        if let recordingError {
-            throw recordingError
+        return try audioStateQueue.sync {
+            let error = recordingError
+            let url = recordingURL
+            let summary = RecordedAudio(
+                fileURL: url ?? URL(fileURLWithPath: ""),
+                duration: Date().timeIntervalSince(currentStartDate),
+                sampleRate: sampleRate,
+                samplesRecorded: samplesRecorded
+            )
+            audioFile = nil
+            if let error {
+                throw error
+            }
+            guard url != nil else {
+                throw TypeMoreError.recordingFileMissing
+            }
+            return summary
         }
-
-        guard let recordingURL else {
-            throw TypeMoreError.recordingFileMissing
-        }
-
-        return RecordedAudio(
-            fileURL: recordingURL,
-            duration: Date().timeIntervalSince(startDate),
-            sampleRate: sampleRate,
-            samplesRecorded: samplesRecorded
-        )
     }
 
     private func makeRecordingURL() throws -> URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let directory = baseURL.appendingPathComponent("TypeMore/Recordings", isDirectory: true)
+        let directory = AppDirectories.applicationSupport(appending: "TypeMore/Recordings")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("current.wav")
         if FileManager.default.fileExists(atPath: url.path) {

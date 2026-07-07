@@ -22,6 +22,34 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(text, "请重构这个 SwiftUI 视图，并补充单元测试。")
     }
 
+    func testSanitizeLLMResponseStripsMarkdownFence() {
+        XCTAssertEqual(
+            OpenAICompatibleOptimizationService.sanitizeLLMResponse("```text\n请重构这个 SwiftUI 视图。\n```"),
+            "请重构这个 SwiftUI 视图。"
+        )
+        XCTAssertEqual(
+            OpenAICompatibleOptimizationService.sanitizeLLMResponse("```\n请重构这个 SwiftUI 视图。\n```"),
+            "请重构这个 SwiftUI 视图。"
+        )
+    }
+
+    func testSanitizeLLMResponseStripsExplanatoryPreamble() {
+        XCTAssertEqual(
+            OpenAICompatibleOptimizationService.sanitizeLLMResponse("好的，优化后的文本是：\n请重构这个 SwiftUI 视图。"),
+            "请重构这个 SwiftUI 视图。"
+        )
+        XCTAssertEqual(
+            OpenAICompatibleOptimizationService.sanitizeLLMResponse("Here is the optimized text:\nRefactor this SwiftUI view."),
+            "Refactor this SwiftUI view."
+        )
+    }
+
+    func testSanitizeLLMResponseDoesNotStripInnerMarkdownFence() {
+        let text = "请生成：\n```swift\nText(\"Hello\")\n```"
+
+        XCTAssertEqual(OpenAICompatibleOptimizationService.sanitizeLLMResponse(text), text)
+    }
+
     func testSettingsStorePersistsLLMConfiguration() {
         let suiteName = "TypeMoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -44,6 +72,7 @@ final class LLMOptimizationTests: XCTestCase {
         store.externalTriggerProductID = 16401
         store.externalTriggerSuppressVolume = false
         store.externalTriggerCancelModifier = .option
+        store.cancelHotkey = HotkeyDefinition(keyCode: 8, modifiers: HotkeyDefinition.defaultCancel.modifiers)
         store.personalDictionary = [
             DictionaryEntry(term: " 张三 ", aliases: [" 章三 ", ""], note: " 人名 "),
             DictionaryEntry(term: "", aliases: ["空词条"]),
@@ -68,6 +97,7 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(reloaded.externalTriggerProductID, 16401)
         XCTAssertFalse(reloaded.externalTriggerSuppressVolume)
         XCTAssertEqual(reloaded.externalTriggerCancelModifier, .option)
+        XCTAssertEqual(reloaded.cancelHotkey.keyCode, 8)
         XCTAssertEqual(reloaded.personalDictionary.map(\.term), ["张三", "SwiftUI"])
         XCTAssertEqual(reloaded.personalDictionary.map(\.aliases), [["章三"], ["swift ui"]])
         XCTAssertEqual(reloaded.personalDictionary.first?.note, "人名")

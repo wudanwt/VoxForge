@@ -89,7 +89,13 @@ private struct GeneralSettingsView: View {
                 capturingTarget = .returnKey
             }
 
-            LabeledContent("中断快捷键", value: appModel.cancelHotkey.displayName)
+            HotkeyRow(
+                title: "中断快捷键",
+                hotkey: appModel.cancelHotkey,
+                isCapturing: capturingTarget == .cancel
+            ) {
+                capturingTarget = .cancel
+            }
 
             if let capturingTarget {
                 VStack(alignment: .leading, spacing: 8) {
@@ -625,6 +631,12 @@ private struct PrivacySettingsView: View {
                 appModel.clearHistory()
             }
 
+            Picker("历史保留", selection: historyRetentionBinding) {
+                ForEach(HistoryRetention.allCases) { retention in
+                    Text(retention.title).tag(retention)
+                }
+            }
+
             Toggle("保留录音调试文件", isOn: keepDebugRecordingsBinding)
 
             Divider()
@@ -684,6 +696,13 @@ private struct PrivacySettingsView: View {
         Binding(
             get: { appModel.keepDebugRecordings },
             set: { appModel.updateKeepDebugRecordings($0) }
+        )
+    }
+
+    private var historyRetentionBinding: Binding<HistoryRetention> {
+        Binding(
+            get: { appModel.historyRetention },
+            set: { appModel.updateHistoryRetention($0) }
         )
     }
 

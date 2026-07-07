@@ -137,7 +137,11 @@ private struct FakeAudioRecorder: AudioRecordingService {
 }
 
 private struct FakeLiveAudioRecorder: LiveAudioRecordingService {
-    func startStreaming(keepDebugFile: Bool, onSamples: @escaping @Sendable ([Float], Double) -> Void) throws {}
+    func startStreaming(
+        keepDebugFile: Bool,
+        onSamples: @escaping @Sendable ([Float], Double) -> Void,
+        onStreamInterrupted: @escaping @Sendable (Error) -> Void
+    ) throws {}
     func stopStreaming() throws -> LiveRecordingSummary {
         LiveRecordingSummary(fileURL: nil, duration: 0, sampleRate: 16_000, samplesRecorded: 0)
     }

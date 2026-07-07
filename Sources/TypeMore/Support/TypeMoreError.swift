@@ -13,6 +13,8 @@ enum TypeMoreError: LocalizedError {
     case recognitionBackendUnavailable(String)
     case operationTimedOut(String)
     case diagnosticExportFailed(String)
+    case targetActivationFailed(String)
+    case audioInputConfigurationChanged
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +42,10 @@ enum TypeMoreError: LocalizedError {
             message
         case .diagnosticExportFailed(let message):
             "导出诊断包失败：\(message)"
+        case .targetActivationFailed(let appName):
+            "目标应用未能激活：\(appName)"
+        case .audioInputConfigurationChanged:
+            "音频输入设备已变化，听写已停止，请重试。"
         }
     }
 }

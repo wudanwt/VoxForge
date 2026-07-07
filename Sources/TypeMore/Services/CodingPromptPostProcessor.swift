@@ -1,10 +1,6 @@
 import Foundation
 
 final class CodingPromptPostProcessor: PostProcessingService {
-    private let fillerPatterns = [
-        "呃", "嗯", "那个", "就是", "然后呢", "的话", "um", "uh", "you know"
-    ]
-
     func process(_ text: String, mode: DictationMode, profile: AppProfile, dictionary _: [DictionaryEntry]) -> String {
         var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -12,10 +8,7 @@ final class CodingPromptPostProcessor: PostProcessingService {
             return output
         }
 
-        for filler in fillerPatterns {
-            output = output.replacingOccurrences(of: filler, with: "")
-        }
-
+        output = removeSafeFillers(output)
         output = collapseWhitespace(output)
 
         if mode == .codingPrompt {
@@ -29,9 +22,32 @@ final class CodingPromptPostProcessor: PostProcessingService {
 
     private func collapseWhitespace(_ text: String) -> String {
         text
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+            .components(separatedBy: .newlines)
+            .map { line in
+                line
+                    .components(separatedBy: .whitespaces)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            .joined(separator: "\n")
+    }
+
+    private func removeSafeFillers(_ text: String) -> String {
+        var output = text
+        let patterns = [
+            #"(^|[\n，,。.!！？?、；;：:\s])(呃|嗯|那个|然后呢)(?=[\s，,。.!！？?、；;：:]|$)"#,
+            #"(^|[\n，,。.!！？?、；;：:\s])就是说(?=\S)"#,
+            #"(^|[\n，,。.!！？?、；;：:\s])(um|uh|you know)(?=[\s，,。.!！？?、；;：:]|$)"#
+        ]
+        for pattern in patterns {
+            output = output.replacingOccurrences(
+                of: pattern,
+                with: "$1",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return output
     }
 
     private func trimLoosePunctuation(_ text: String) -> String {

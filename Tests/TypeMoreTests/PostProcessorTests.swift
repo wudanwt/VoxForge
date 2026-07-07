@@ -113,4 +113,28 @@ final class PostProcessorTests: XCTestCase {
 
         XCTAssertEqual(result, "今天五律要去上课")
     }
+
+    func testFillerRemovalKeepsMeaningfulChineseWords() {
+        let processor = CodingPromptPostProcessor()
+        let result = processor.process(
+            "你就是对的，这样的话题继续讲",
+            mode: .general,
+            profile: .generic,
+            dictionary: []
+        )
+
+        XCTAssertEqual(result, "你就是对的，这样的话题继续讲")
+    }
+
+    func testFillerRemovalHandlesSentenceStartAndPreservesNewlines() {
+        let processor = CodingPromptPostProcessor()
+        let result = processor.process(
+            "就是说我们要重构这里\n然后呢   补充测试",
+            mode: .general,
+            profile: .generic,
+            dictionary: []
+        )
+
+        XCTAssertEqual(result, "我们要重构这里\n补充测试")
+    }
 }

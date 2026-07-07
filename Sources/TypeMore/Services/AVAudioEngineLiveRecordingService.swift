@@ -3,6 +3,7 @@ import Foundation
 
 final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
     private var engine = AVAudioEngine()
+    private let audioStateQueue = DispatchQueue(label: "VoxForge.AVAudioEngineLiveRecordingService.state")
     private let diagnosticsRecorder: DiagnosticsRecorder
     private let targetSampleRate: Double = 16_000
     private var targetFormat: AVAudioFormat?
@@ -14,6 +15,8 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
     private var recordingURL: URL?
     private var recordingError: Error?
     private var onSamples: (@Sendable ([Float], Double) -> Void)?
+    private var onStreamInterrupted: (@Sendable (Error) -> Void)?
+    private var configurationObserver: NSObjectProtocol?
 
     init(diagnosticsRecorder: DiagnosticsRecorder = DiagnosticsRecorder()) {
         self.diagnosticsRecorder = diagnosticsRecorder
@@ -21,7 +24,8 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
 
     func startStreaming(
         keepDebugFile: Bool,
-        onSamples: @escaping @Sendable ([Float], Double) -> Void
+        onSamples: @escaping @Sendable ([Float], Double) -> Void,
+        onStreamInterrupted: @escaping @Sendable (Error) -> Void
     ) throws {
         if engine.isRunning {
             diagnosticsRecorder.record(DiagnosticEvent(
@@ -54,46 +58,65 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
             throw TypeMoreError.audioConversionUnavailable
         }
 
-        self.targetFormat = targetFormat
-        self.converter = converter
-        self.onSamples = onSamples
-        samplesRecorded = 0
-        didLogFirstBuffer = false
-        recordingError = nil
-        recordingURL = nil
-        audioFile = nil
-
+        var debugAudioFile: AVAudioFile?
+        var debugAudioURL: URL?
         if keepDebugFile {
             let url = try makeRecordingURL()
-            audioFile = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
-            recordingURL = url
+            debugAudioFile = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
+            debugAudioURL = url
+        }
+
+        audioStateQueue.sync {
+            self.targetFormat = targetFormat
+            self.converter = converter
+            self.onSamples = onSamples
+            self.onStreamInterrupted = onStreamInterrupted
+            samplesRecorded = 0
+            didLogFirstBuffer = false
+            recordingError = nil
+            recordingURL = debugAudioURL
+            audioFile = debugAudioFile
         }
 
         input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
             self?.handleIncomingBuffer(buffer)
         }
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.handleConfigurationChange()
+        }
 
         engine.prepare()
         try engine.start()
-        startDate = Date()
+        let startedAt = Date()
+        audioStateQueue.sync {
+            startDate = startedAt
+        }
+        let debugAudioPath = audioStateQueue.sync { recordingURL?.path }
         diagnosticsRecorder.record(DiagnosticEvent(
             category: .audio,
             phase: "streaming_audio.started",
             audio: audioSnapshot(inputFormat: inputFormat, engineWasRunning: engine.isRunning),
-            debugAudioPath: recordingURL?.path
+            debugAudioPath: debugAudioPath
         ))
     }
 
     func stopStreaming() throws -> LiveRecordingSummary {
-        guard engine.isRunning, let startDate else {
-            let debugAudioPath = recordingURL?.path
+        let currentStartDate = audioStateQueue.sync { startDate }
+        guard engine.isRunning, let currentStartDate else {
+            let state = audioStateQueue.sync {
+                (samplesRecorded: samplesRecorded, debugAudioPath: recordingURL?.path)
+            }
             diagnosticsRecorder.record(DiagnosticEvent(
                 category: .audio,
                 phase: "streaming_audio.stop_failed",
                 error: TypeMoreError.recordingNotActive.localizedDescription,
                 audio: audioSnapshot(engineWasRunning: engine.isRunning),
-                samplesRecorded: samplesRecorded,
-                debugAudioPath: debugAudioPath
+                samplesRecorded: state.samplesRecorded,
+                debugAudioPath: state.debugAudioPath
             ))
             resetEngineState()
             throw TypeMoreError.recordingNotActive
@@ -101,38 +124,63 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        audioFile = nil
-        converter = nil
-        onSamples = nil
+        removeConfigurationObserver()
 
-        if let recordingError {
-            diagnosticsRecorder.record(DiagnosticEvent(
-                category: .audio,
-                phase: "streaming_audio.recording_error",
-                error: recordingError.localizedDescription,
-                samplesRecorded: samplesRecorded,
-                debugAudioPath: recordingURL?.path
-            ))
-            throw recordingError
+        let state = audioStateQueue.sync {
+            let state = (
+                recordingError: recordingError,
+                recordingURL: recordingURL,
+                samplesRecorded: samplesRecorded
+            )
+            audioFile = nil
+            converter = nil
+            onSamples = nil
+            onStreamInterrupted = nil
+            return state
         }
+
+        if let recordingError = state.recordingError {
+             diagnosticsRecorder.record(DiagnosticEvent(
+                 category: .audio,
+                 phase: "streaming_audio.recording_error",
+                 error: recordingError.localizedDescription,
+                 samplesRecorded: state.samplesRecorded,
+                 debugAudioPath: state.recordingURL?.path
+             ))
+             throw recordingError
+         }
 
         diagnosticsRecorder.record(DiagnosticEvent(
             category: .audio,
             phase: "streaming_audio.stopped",
-            durationMs: Int(Date().timeIntervalSince(startDate) * 1000),
-            samplesRecorded: samplesRecorded,
-            debugAudioPath: recordingURL?.path
+            durationMs: Int(Date().timeIntervalSince(currentStartDate) * 1000),
+            samplesRecorded: state.samplesRecorded,
+            debugAudioPath: state.recordingURL?.path
         ))
 
         return LiveRecordingSummary(
-            fileURL: recordingURL,
-            duration: Date().timeIntervalSince(startDate),
+            fileURL: state.recordingURL,
+            duration: Date().timeIntervalSince(currentStartDate),
             sampleRate: targetSampleRate,
-            samplesRecorded: samplesRecorded
+            samplesRecorded: state.samplesRecorded
         )
     }
 
     private func handleIncomingBuffer(_ buffer: AVAudioPCMBuffer) {
+        audioStateQueue.async { [weak self] in
+            self?.processIncomingBuffer(buffer)
+        }
+    }
+
+    private func handleConfigurationChange() {
+        audioStateQueue.async { [weak self] in
+            guard let self else { return }
+            self.recordingError = TypeMoreError.audioInputConfigurationChanged
+            self.onStreamInterrupted?(TypeMoreError.audioInputConfigurationChanged)
+        }
+    }
+
+    private func processIncomingBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let converted = convert(buffer) else { return }
         samplesRecorded += Int(converted.frameLength)
         if !didLogFirstBuffer {
@@ -198,8 +246,7 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
     }
 
     private func makeRecordingURL() throws -> URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let directory = baseURL.appendingPathComponent("TypeMore/Recordings", isDirectory: true)
+        let directory = AppDirectories.applicationSupport(appending: "TypeMore/Recordings")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("current-stream.wav")
         if FileManager.default.fileExists(atPath: url.path) {
@@ -213,15 +260,26 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
             engine.stop()
         }
         engine.inputNode.removeTap(onBus: 0)
+        removeConfigurationObserver()
         engine = AVAudioEngine()
-        targetFormat = nil
-        converter = nil
-        startDate = nil
-        samplesRecorded = 0
-        didLogFirstBuffer = false
-        audioFile = nil
-        onSamples = nil
-        recordingError = nil
+        audioStateQueue.sync {
+            targetFormat = nil
+            converter = nil
+            startDate = nil
+            samplesRecorded = 0
+            didLogFirstBuffer = false
+            audioFile = nil
+            onSamples = nil
+            onStreamInterrupted = nil
+            recordingError = nil
+        }
+    }
+
+    private func removeConfigurationObserver() {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
     }
 
     private func audioSnapshot(inputFormat: AVAudioFormat? = nil, engineWasRunning: Bool) -> DiagnosticAudioSnapshot {

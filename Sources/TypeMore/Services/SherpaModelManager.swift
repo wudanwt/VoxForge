@@ -23,8 +23,7 @@ final class SherpaModelManager {
         if let baseDirectory {
             self.baseDirectory = baseDirectory
         } else {
-            let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            self.baseDirectory = appSupport.appendingPathComponent("TypeMore/Models", isDirectory: true)
+            self.baseDirectory = AppDirectories.applicationSupport(fileManager: fileManager, appending: "TypeMore/Models")
         }
     }
 

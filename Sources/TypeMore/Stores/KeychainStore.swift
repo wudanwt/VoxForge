@@ -6,8 +6,7 @@ final class KeychainStore {
     private let legacyService = "com.typemore.app"
 
     private var secretsDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return base.appendingPathComponent("VoxForge/Secrets", isDirectory: true)
+        AppDirectories.applicationSupport(appending: "VoxForge/Secrets")
     }
 
     func string(for key: String) -> String {

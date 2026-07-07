@@ -212,8 +212,7 @@ final class DiagnosticsRecorder: @unchecked Sendable {
     }
 
     static func defaultDirectory(fileManager: FileManager = .default) -> URL {
-        let baseURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return baseURL.appendingPathComponent("TypeMore/Diagnostics", isDirectory: true)
+        AppDirectories.applicationSupport(fileManager: fileManager, appending: "TypeMore/Diagnostics")
     }
 
     private func rotateIfNeeded() throws {
