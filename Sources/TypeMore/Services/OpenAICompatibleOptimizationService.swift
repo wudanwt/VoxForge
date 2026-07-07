@@ -126,7 +126,7 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
         let dictionarySection = dictionaryContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "个人词典：无"
             : "个人词典：\n\(dictionaryContext)"
-        return "\(dictionarySection)\n\n原始转写：\n\(rawText)\n\n本地清理后：\n\(cleanedText)\n\n请只输出最终要粘贴的文本，不要解释。"
+        return "\(dictionarySection)\n\n原始转写：\n\(rawText)\n\n本地清理后：\n\(cleanedText)\n\n请校验语义是否通顺，修正明显由语音识别造成的错别字、同音误写、术语前后不一致和语病；清理“一个、就是、然后、的话”等不影响含义的口语赘余；不要新增事实。输出前请自检：是否仍有前后不一致的英文术语、明显错词或生硬语病，例如“web coding/外部 coding”应根据上下文统一为“vibe coding”，“表达自己的意识”应改为“表达自己的意思”，“你是不明确的”应改为“表达不够明确”。只输出最终要粘贴的文本，不要解释。"
     }
 
     private func renderPromptTemplate(
@@ -156,6 +156,7 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
                 let aliases = entry.aliases
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
+                guard !aliases.isEmpty else { return nil }
                 let note = entry.note.trimmingCharacters(in: .whitespacesAndNewlines)
                 var parts = ["标准词条：\(term)"]
                 if !aliases.isEmpty {
@@ -183,8 +184,12 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
             - 尽量保留用户原始措辞、语气、顺序和中英混排。
             - 只删除明显口头禅、重复音、无意义停顿。
             - 自动补充必要标点，把明显过长的句子拆成短句。
+            - 校验语义是否通顺，修正明显由语音识别造成的错别字、同音误写和语病。
+            - 保持同一段话里的术语前后一致；如果后文出现与前文术语读音相近、上下文相同的误写，优先统一为前文已确认的写法。
+            - 修正明显不符合中文语义的同音错词，例如“表达自己的意识”应改为“表达自己的意思”。
             - 参考个人词典修正人名、项目名、产品名和专有名词；只有上下文、读音或常见误听匹配时才使用词典，不要机械替换。
             - 不总结、不扩写、不改写成正式文风。
+            - 如果无法确定原意，保留原文，不要为了通顺而猜测新含义。
             - 保留技术关键词、英文标识符、文件名、命令、路径、错误信息、API 名称。
             - 个人词典：
             {dictionary}
@@ -199,9 +204,14 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
             输出要求：
             - 只输出最终要粘贴/发送的文本，不要解释。
             - 删除口头禅、重复、犹豫、改口和无意义停顿。
+            - 清理“一个、就是、然后、的话”等不影响含义的口语赘余，让句子更自然。
             - 自动补充中文/英文标点，优先使用短句。
+            - 校验语义是否通顺，修正明显由语音识别造成的错别字、同音误写和语病。
+            - 保持同一段话里的术语前后一致；如果后文出现与前文术语读音相近、上下文相同的误写，优先统一为前文已确认的写法。
+            - 修正明显不符合中文语义的同音错词，例如“表达自己的意识”应改为“表达自己的意思”，“你是不明确的”应改为“表达不够明确”。
             - 保留用户真实意图，不新增事实，不编造细节。
             - 参考个人词典修正人名、项目名、产品名和专有名词；只有上下文、读音或常见误听匹配时才使用词典，不要机械替换。
+            - 如果无法确定原意，保留原文，不要为了通顺而猜测新含义。
             - 内容较短时只做轻量润色；内容较长时分段或列点。
             - 保留必要的技术词、英文、数字、文件名、命令和专有名词。
             - 个人词典：
@@ -218,10 +228,16 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
             1. 总结与结构化：把零散口语整理成清晰的需求、问题、步骤或待办。
             2. 文本润色：删除口头禅、重复、犹豫、改口和无意义停顿，让表达更准确。
             3. 标点与短句：自动补充中文/英文标点；把过长句拆成短句；让文本更容易被 AI 编程工具理解。
+            4. 语义校验：修正明显由语音识别造成的错别字、同音误写和语病，让句子符合上下文逻辑。
 
             重要原则：
             - 只输出最终要粘贴/发送的文本，不要解释你的修改过程。
             - 保留用户真实意图，不新增事实，不编造技术细节。
+            - 校验语义是否通顺，修正明显由语音识别造成的错别字、同音误写和语病。
+            - 保持同一段话里的技术术语前后一致；如果后文出现与前文术语读音相近、上下文相同的误写，优先统一为前文已确认的写法，例如前文是“vibe coding”，后文不要误保留为“web coding”或“外部 coding”。
+            - 修正明显不符合中文语义的同音错词，例如“表达自己的意识”应改为“表达自己的意思”，“你是不明确的”应改为“表达不够明确”。
+            - 清理“一个、就是、然后、的话”等不影响含义的口语赘余，让提示词更直接。
+            - 如果无法确定原意，保留原文，不要为了通顺而猜测新需求。
             - 不要求输出严格符合某种编程语言语法；重点是让需求、问题和上下文清楚。
             - 参考个人词典修正人名、项目名、产品名和专有名词；只有上下文、读音或常见误听匹配时才使用词典，不要机械替换，不要强行把普通词替换成词典项。
             - 保留技术关键词、英文标识符、文件名、函数名、类名、命令、路径、错误信息、API 名称。

@@ -371,7 +371,7 @@ private struct DictionarySettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("自定义词典")
                         .font(.title2.weight(.semibold))
-                    Text("把人名、项目名、产品名或命令写成个人词条。大模型会结合上下文和常见误听判断是否应改成标准写法；未开启大模型时，仅对你明确填写的常见误听做本地兜底。")
+                    Text("把人名、项目名、产品名或命令写成个人词条。开启大模型优化后，模型会结合原始转写、上下文和常见误听判断是否应改成标准写法。")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -412,7 +412,7 @@ private struct DictionarySettingsView: View {
                 .padding(14)
                 .background(.quaternary.opacity(0.20), in: RoundedRectangle(cornerRadius: 10))
 
-                Text("提示：标准词条会作为识别热词和大模型上下文；常见误听只用于后处理和大模型判断，不会强化给识别模型。")
+                Text("提示：个人词典只作为大模型上下文使用，不会在本地阶段直接查找替换，也不会作为识别热词强行偏置。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

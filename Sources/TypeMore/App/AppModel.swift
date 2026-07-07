@@ -7,7 +7,7 @@ import Observation
 final class AppModel {
     var sessionState: DictationSessionState = .idle
     var selectedMode: DictationMode = .codingPrompt
-    var statusMessage = "准备好进行 vibe coding"
+    var statusMessage = "准备好听写"
     var lastTranscript = ""
     var lastTargetApplication: RunningApplicationInfo?
     var appProfiles: [AppProfile] = AppProfile.defaults
@@ -49,7 +49,7 @@ final class AppModel {
     var externalTriggerLastEvent: ExternalTriggerLastEvent?
 
     private let audioRecorder: AudioRecordingService
-    private let streamingAudioRecorder: LiveAudioRecordingService
+    private var streamingAudioRecorder: LiveAudioRecordingService
     private let transcriptionEngine: TranscriptionEngine
     private var sherpaStreamingEngine: StreamingSpeechEngine
     private let whisperKitStreamingEngine: StreamingSpeechEngine
@@ -72,6 +72,8 @@ final class AppModel {
     private let hudController = DictationHUDController()
     private var activeOperationID: UUID?
     private var startupWatchdog: DispatchWorkItem?
+    private var audioStartupWatchdog: DispatchWorkItem?
+    private var lastAudioBufferOperationID: UUID?
     private var sherpaPrewarmTask: Task<Void, Never>?
     private var deferredSherpaPrewarmTask: Task<Void, Never>?
     private var didStartAppServices = false
@@ -569,8 +571,22 @@ final class AppModel {
                 durationMs: Int(Date().timeIntervalSince(sessionStartedAt) * 1000)
             )
 
+            startupPhase = "audio_start"
+            transition(to: .processing, message: "正在启动麦克风输入")
+            recordDiagnostic(
+                category: .audio,
+                phase: "streaming_audio.start.begin",
+                operationID: operationID,
+                backend: backend,
+                message: "正在启动麦克风输入"
+            )
+            lastAudioBufferOperationID = nil
             try streamingAudioRecorder.startStreaming(keepDebugFile: shouldCaptureDebugAudio) { samples, sampleRate in
                 Task {
+                    await MainActor.run {
+                        self.lastAudioBufferOperationID = operationID
+                        self.cancelAudioStartupWatchdog()
+                    }
                     await engine.acceptAudio(samples: samples, sampleRate: sampleRate)
                 }
             }
@@ -581,6 +597,7 @@ final class AppModel {
             }
             recordingStart = Date()
             cancelStartupWatchdog()
+            scheduleAudioStartupWatchdog(operationID: operationID, backend: backend, engine: engine, seconds: 2.0)
             recordDiagnostic(
                 category: .dictation,
                 phase: "dictation.recording_started",
@@ -591,6 +608,7 @@ final class AppModel {
         } catch {
             guard isActiveOperation(operationID) else { return }
             cancelStartupWatchdog()
+            cancelAudioStartupWatchdog()
             let timedOut = (error as? TypeMoreError)?.isOperationTimeout == true
             recordDiagnostic(
                 category: .recognition,
@@ -616,6 +634,7 @@ final class AppModel {
     }
 
     private func finishStreamingDictation(engine: StreamingSpeechEngine, operationID: UUID, finishMessage: String) async {
+        cancelAudioStartupWatchdog()
         transition(to: .processing, message: finishMessage, preview: lastTranscript)
         recordDiagnostic(
             category: .dictation,
@@ -741,6 +760,19 @@ final class AppModel {
 
         if llmOptimizationEnabled {
             loadLLMAPIKeyIfNeeded()
+            recordDiagnostic(
+                category: .dictation,
+                phase: "llm.optimize.start",
+                operationID: operationID,
+                backend: backend,
+                targetApp: targetApp,
+                details: [
+                    "baseURL": llmBaseURL,
+                    "model": llmModel,
+                    "hasAPIKey": llmAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "false" : "true",
+                    "usesDefaultPrompt": isUsingDefaultLLMPromptTemplate(for: selectedMode) ? "true" : "false"
+                ]
+            )
             transition(to: .optimizing, message: "正在用大模型优化", preview: processed)
             do {
                 finalText = try await llmOptimizationService.optimize(
@@ -752,12 +784,28 @@ final class AppModel {
                 )
                 guard isActiveOperation(operationID) else { return }
                 optimizedWithLLM = true
+                recordDiagnostic(
+                    category: .dictation,
+                    phase: "llm.optimize.success",
+                    operationID: operationID,
+                    backend: backend,
+                    targetApp: targetApp
+                )
             } catch {
                 guard isActiveOperation(operationID) else { return }
                 recordDiagnostic(category: .dictation, phase: "llm.optimize.failed", operationID: operationID, backend: backend, error: error)
                 statusMessage = "大模型优化失败，已使用本地结果：\(error.localizedDescription)"
                 hudController.show(state: .optimizing, message: "大模型优化失败，已使用本地结果", preview: processed)
             }
+        } else {
+            recordDiagnostic(
+                category: .dictation,
+                phase: "llm.optimize.skipped",
+                operationID: operationID,
+                backend: backend,
+                targetApp: targetApp,
+                message: "大模型优化未启用"
+            )
         }
 
         lastTranscript = finalText
@@ -821,6 +869,7 @@ final class AppModel {
             message: "user interrupt"
         )
         cancelStartupWatchdog()
+        cancelAudioStartupWatchdog()
         activeOperationID = nil
         if activeDictationPath == .sherpaParaformer {
             _ = try? streamingAudioRecorder.stopStreaming()
@@ -1014,6 +1063,52 @@ final class AppModel {
     private func cancelStartupWatchdog() {
         startupWatchdog?.cancel()
         startupWatchdog = nil
+    }
+
+    private func scheduleAudioStartupWatchdog(
+        operationID: UUID,
+        backend: RecognitionBackend,
+        engine: StreamingSpeechEngine,
+        seconds: TimeInterval
+    ) {
+        cancelAudioStartupWatchdog()
+        guard lastAudioBufferOperationID != operationID else { return }
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      self.isActiveOperation(operationID),
+                      self.activeDictationPath == ActiveDictationPath(backend: backend),
+                      self.lastAudioBufferOperationID != operationID
+                else { return }
+
+                self.recordDiagnostic(
+                    category: .audio,
+                    phase: "streaming_audio.first_buffer.timeout",
+                    operationID: operationID,
+                    backend: backend,
+                    errorMessage: "麦克风输入启动后 \(String(format: "%.1f", seconds)) 秒内没有收到音频数据。",
+                    timeoutSeconds: seconds,
+                    details: [
+                        "willCancelEngine": "true",
+                        "willRebuildSherpa": String(backend == .sherpaParaformer)
+                    ]
+                )
+                _ = try? self.streamingAudioRecorder.stopStreaming()
+                await engine.cancel()
+                self.activeDictationPath = nil
+                if backend == .sherpaParaformer {
+                    self.rebuildSherpaStreamingEngine()
+                }
+                self.fail("麦克风输入没有返回音频数据。请检查或重新连接当前输入设备后重试。")
+            }
+        }
+        audioStartupWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    private func cancelAudioStartupWatchdog() {
+        audioStartupWatchdog?.cancel()
+        audioStartupWatchdog = nil
     }
 
     private func cancelEngineAfterStartupFailure(_ engine: StreamingSpeechEngine, error: Error) {
@@ -1494,25 +1589,11 @@ final class AppModel {
     }
 
     private func diagnosticAudioURLsForExport() -> [URL] {
-        var urls: [URL] = []
-        if let path = diagnosticsRecorder.recentFailureSummary()?.debugAudioPath {
-            urls.append(URL(fileURLWithPath: path))
+        guard let path = diagnosticsRecorder.recentFailureSummary()?.debugAudioPath else {
+            return []
         }
-
-        let recordingsDirectory = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("TypeMore/Recordings", isDirectory: true)
-        if let files = try? FileManager.default.contentsOfDirectory(at: recordingsDirectory, includingPropertiesForKeys: nil) {
-            urls.append(contentsOf: files.filter { $0.pathExtension.lowercased() == "wav" })
-        }
-
-        var seen = Set<String>()
-        return urls.filter { url in
-            guard FileManager.default.fileExists(atPath: url.path), !seen.contains(url.path) else { return false }
-            seen.insert(url.path)
-            return true
-        }
+        let url = URL(fileURLWithPath: path)
+        return FileManager.default.fileExists(atPath: url.path) ? [url] : []
     }
 
     private func performanceStatus(for result: StreamingTranscriptionResult) -> String {
@@ -1537,7 +1618,7 @@ final class AppModel {
     }
 }
 
-private enum ActiveDictationPath {
+private enum ActiveDictationPath: Equatable {
     case sherpaParaformer
     case whisperKitStreaming
     case appleDictation

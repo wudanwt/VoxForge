@@ -52,18 +52,10 @@ actor AppleSpeechAnalyzerStreamingEngine: StreamingTranscriptionEngine {
             ?? naturalFormat
         selectedFormat = audioFormat
 
-        let context = AnalysisContext()
-        context.contextualStrings[.general] = dictionary
-            .filter(\.isEnabled)
-            .map(\.term)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
         let analyzer = SpeechAnalyzer(
             modules: modules,
             options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .processLifetime)
         )
-        try await analyzer.setContext(context)
         try await analyzer.prepareToAnalyze(in: audioFormat)
 
         var continuation: AsyncStream<AnalyzerInput>.Continuation?

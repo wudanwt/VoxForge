@@ -5,24 +5,8 @@ final class CodingPromptPostProcessor: PostProcessingService {
         "呃", "嗯", "那个", "就是", "然后呢", "的话", "um", "uh", "you know"
     ]
 
-    func process(_ text: String, mode: DictationMode, profile: AppProfile, dictionary: [DictionaryEntry]) -> String {
+    func process(_ text: String, mode: DictationMode, profile: AppProfile, dictionary _: [DictionaryEntry]) -> String {
         var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        for entry in dictionary {
-            guard entry.isEnabled else { continue }
-            let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !term.isEmpty else { continue }
-
-            for alias in entry.aliases {
-                let alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !alias.isEmpty else { continue }
-                output = output.replacingOccurrences(
-                    of: alias,
-                    with: term,
-                    options: [.caseInsensitive, .diacriticInsensitive]
-                )
-            }
-        }
 
         guard mode != .literal else {
             return output
@@ -38,7 +22,6 @@ final class CodingPromptPostProcessor: PostProcessingService {
             output = output
                 .replacingOccurrences(of: "Swift UI", with: "SwiftUI")
                 .replacingOccurrences(of: "单元 测试", with: "单元测试")
-                .replacingOccurrences(of: "vibe Codinging", with: "vibe coding")
         }
 
         return trimLoosePunctuation(output)

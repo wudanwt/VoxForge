@@ -19,13 +19,7 @@ final class SherpaHotwordsStore {
         return url
     }
 
-    private func hotwords(from dictionary: [DictionaryEntry]) -> [String] {
-        let dictionaryWords = dictionary
-            .filter(\.isEnabled)
-            .map(\.term)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter(isSupportedHotword)
-
+    private func hotwords(from _: [DictionaryEntry]) -> [String] {
         let codingWords = [
             "SwiftUI",
             "Xcode",
@@ -39,7 +33,7 @@ final class SherpaHotwordsStore {
             "LLM"
         ]
 
-        return Array(Set(dictionaryWords + codingWords.filter(isSupportedHotword))).sorted()
+        return Array(Set(codingWords.filter(isSupportedHotword))).sorted()
     }
 
     private func isSupportedHotword(_ word: String) -> Bool {

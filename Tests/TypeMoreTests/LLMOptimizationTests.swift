@@ -98,6 +98,22 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).personalDictionary, [])
     }
 
+    func testSettingsStoreRemovesLegacyVibeCodingDefaultEntry() {
+        let suiteName = "TypeMoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = SettingsStore(defaults: defaults)
+        store.personalDictionary = [
+            DictionaryEntry(term: "vibe coding", note: "AI 编程工作流常用术语"),
+            DictionaryEntry(term: "SwiftUI", aliases: ["swift ui"])
+        ]
+
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.personalDictionary.map(\.term), ["SwiftUI"])
+        XCTAssertFalse(DictionaryEntry.defaults.contains { $0.term.caseInsensitiveCompare("vibe coding") == .orderedSame })
+    }
+
     func testLegacyDictionaryEntryDecodesToTermAndAlias() throws {
         let json = """
         {
@@ -125,6 +141,45 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertTrue(context.contains("常见误听：五律、无虑"))
         XCTAssertTrue(context.contains("说明：我女儿名字，人名"))
         XCTAssertFalse(context.contains("停用词"))
+    }
+
+    func testDictionaryContextSkipsTermsWithoutAliases() {
+        let context = OpenAICompatibleOptimizationService.dictionaryContext(from: [
+            DictionaryEntry(term: "vibe coding", note: "AI 编程工作流常用术语"),
+            DictionaryEntry(term: "Xcode", aliases: ["x code"])
+        ])
+
+        XCTAssertFalse(context.contains("vibe coding"))
+        XCTAssertTrue(context.contains("Xcode"))
+    }
+
+    func testDefaultPromptsAskLLMToFixSemanticTyposAndGrammar() {
+        for mode in DictationMode.allCases {
+            let prompt = OpenAICompatibleOptimizationService.defaultPromptTemplate(for: mode)
+
+            XCTAssertTrue(prompt.contains("校验语义"))
+            XCTAssertTrue(prompt.contains("错别字"))
+            XCTAssertTrue(prompt.contains("同音误写"))
+            XCTAssertTrue(prompt.contains("语病"))
+            XCTAssertTrue(prompt.contains("术语"))
+            XCTAssertTrue(prompt.contains("前后一致"))
+            XCTAssertTrue(prompt.contains("口语赘余") || prompt.contains("无意义停顿"))
+            XCTAssertTrue(prompt.contains("表达自己的意识"))
+            XCTAssertTrue(prompt.contains("不要为了通顺而猜测"))
+        }
+    }
+
+    func testCodingPromptMentionsVibeCodingConsistencyExample() {
+        let prompt = OpenAICompatibleOptimizationService.defaultPromptTemplate(for: .codingPrompt)
+
+        XCTAssertTrue(prompt.contains("vibe coding"))
+        XCTAssertTrue(prompt.contains("web coding"))
+        XCTAssertTrue(prompt.contains("外部 coding"))
+        XCTAssertTrue(prompt.contains("不要误保留"))
+        XCTAssertTrue(prompt.contains("表达自己的意识"))
+        XCTAssertTrue(prompt.contains("表达自己的意思"))
+        XCTAssertTrue(prompt.contains("你是不明确的"))
+        XCTAssertTrue(prompt.contains("表达不够明确"))
     }
 
     func testRecognitionBackendSeparatesStreamingAndBatchWhisperKit() {

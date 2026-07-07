@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let diagnosticsRecorder: DiagnosticsRecorder
     private let targetSampleRate: Double = 16_000
     private var targetFormat: AVAudioFormat?
@@ -32,6 +32,7 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
         }
+        engine = AVAudioEngine()
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
@@ -85,14 +86,16 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
 
     func stopStreaming() throws -> LiveRecordingSummary {
         guard engine.isRunning, let startDate else {
+            let debugAudioPath = recordingURL?.path
             diagnosticsRecorder.record(DiagnosticEvent(
                 category: .audio,
                 phase: "streaming_audio.stop_failed",
                 error: TypeMoreError.recordingNotActive.localizedDescription,
                 audio: audioSnapshot(engineWasRunning: engine.isRunning),
                 samplesRecorded: samplesRecorded,
-                debugAudioPath: recordingURL?.path
+                debugAudioPath: debugAudioPath
             ))
+            resetEngineState()
             throw TypeMoreError.recordingNotActive
         }
 
@@ -203,6 +206,22 @@ final class AVAudioEngineLiveRecordingService: LiveAudioRecordingService {
             try FileManager.default.removeItem(at: url)
         }
         return url
+    }
+
+    private func resetEngineState() {
+        if engine.isRunning {
+            engine.stop()
+        }
+        engine.inputNode.removeTap(onBus: 0)
+        engine = AVAudioEngine()
+        targetFormat = nil
+        converter = nil
+        startDate = nil
+        samplesRecorded = 0
+        didLogFirstBuffer = false
+        audioFile = nil
+        onSamples = nil
+        recordingError = nil
     }
 
     private func audioSnapshot(inputFormat: AVAudioFormat? = nil, engineWasRunning: Bool) -> DiagnosticAudioSnapshot {

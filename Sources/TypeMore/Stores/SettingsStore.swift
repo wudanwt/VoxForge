@@ -93,6 +93,7 @@ final class SettingsStore {
         for entry in entries {
             let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !term.isEmpty else { continue }
+            guard !isLegacyDefaultEntry(entry, normalizedTerm: term) else { continue }
 
             let aliases = entry.aliases
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -115,6 +116,13 @@ final class SettingsStore {
         }
 
         return output
+    }
+
+    private static func isLegacyDefaultEntry(_ entry: DictionaryEntry, normalizedTerm term: String) -> Bool {
+        term.caseInsensitiveCompare("vibe coding") == .orderedSame
+            && entry.aliases.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.isEmpty
+            && entry.note.trimmingCharacters(in: .whitespacesAndNewlines) == "AI 编程工作流常用术语"
+            && entry.isEnabled
     }
 
     var llmOptimizationEnabled: Bool {

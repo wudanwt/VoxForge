@@ -66,7 +66,6 @@ struct DictionaryEntry: Identifiable, Codable, Hashable {
     }
 
     static let defaults: [DictionaryEntry] = [
-        DictionaryEntry(term: "vibe coding", note: "AI 编程工作流常用术语"),
         DictionaryEntry(term: "SwiftUI", aliases: ["swift ui"], note: "Apple UI 框架"),
         DictionaryEntry(term: "Xcode", aliases: ["x code"], note: "Apple 开发工具"),
         DictionaryEntry(term: "Cursor", note: "AI 代码编辑器"),

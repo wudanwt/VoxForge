@@ -180,7 +180,7 @@ final class DiagnosticsRecorder: @unchecked Sendable {
             }
 
             if let summary = event.failureSummary {
-                self.lastFailureSummary = summary
+                self.lastFailureSummary = self.mergedFailureSummary(summary)
             }
         }
     }
@@ -258,6 +258,18 @@ final class DiagnosticsRecorder: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    private func mergedFailureSummary(_ summary: DiagnosticFailureSummary) -> DiagnosticFailureSummary {
+        guard let lastFailureSummary else { return summary }
+        return DiagnosticFailureSummary(
+            timestamp: summary.timestamp,
+            phase: summary.phase,
+            backend: summary.backend ?? lastFailureSummary.backend,
+            error: summary.error,
+            audioInput: summary.audioInput ?? lastFailureSummary.audioInput,
+            debugAudioPath: summary.debugAudioPath ?? lastFailureSummary.debugAudioPath
+        )
     }
 
     private func logFilesWithoutFlush() -> [URL] {

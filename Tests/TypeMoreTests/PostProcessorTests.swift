@@ -29,10 +29,10 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertEqual(result, "呃 echo hello")
     }
 
-    func testPersonalDictionaryReplacesCustomTerms() {
+    func testPersonalDictionaryDoesNotRewriteWithoutLLM() {
         let processor = CodingPromptPostProcessor()
         let result = processor.process(
-            "请让章三修一下 swift ui 这个页面",
+            "请让章三修一下这个页面",
             mode: .general,
             profile: .generic,
             dictionary: [
@@ -41,9 +41,8 @@ final class PostProcessorTests: XCTestCase {
             ]
         )
 
-        XCTAssertTrue(result.contains("张三"))
-        XCTAssertFalse(result.contains("章三"))
-        XCTAssertTrue(result.contains("SwiftUI"))
+        XCTAssertTrue(result.contains("章三"))
+        XCTAssertFalse(result.contains("张三"))
     }
 
     func testPersonalDictionaryIgnoresEmptyDraftEntries() {
@@ -61,6 +60,18 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertEqual(result, "hello")
     }
 
+    func testCodingPromptDoesNotInventVibeCodingFromDefaults() {
+        let processor = CodingPromptPostProcessor()
+        let result = processor.process(
+            "帮我继续优化这个输入功能",
+            mode: .codingPrompt,
+            profile: .generic,
+            dictionary: DictionaryEntry.defaults
+        )
+
+        XCTAssertFalse(result.localizedCaseInsensitiveContains("vibe coding"))
+    }
+
     func testPersonalDictionaryDoesNotReplaceStandardTermWithoutAlias() {
         let processor = CodingPromptPostProcessor()
         let result = processor.process(
@@ -69,6 +80,20 @@ final class PostProcessorTests: XCTestCase {
             profile: .generic,
             dictionary: [
                 DictionaryEntry(term: "吴律", aliases: [], note: "我女儿名字")
+            ]
+        )
+
+        XCTAssertEqual(result, "我今天想写一首五律")
+    }
+
+    func testPersonalDictionaryDoesNotReplaceAliasLocally() {
+        let processor = CodingPromptPostProcessor()
+        let result = processor.process(
+            "我今天想写一首五律",
+            mode: .general,
+            profile: .generic,
+            dictionary: [
+                DictionaryEntry(term: "吴律", aliases: ["五律"], note: "我女儿名字")
             ]
         )
 

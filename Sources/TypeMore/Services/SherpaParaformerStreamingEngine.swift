@@ -198,14 +198,8 @@ actor SherpaParaformerStreamingEngine: StreamingTranscriptionEngine {
         }
     }
 
-    private func hotwordSignature(_ dictionary: [DictionaryEntry]) -> String {
-        dictionary
-            .filter(\.isEnabled)
-            .map(\.term)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .sorted()
-            .joined(separator: "\u{1F}")
+    private func hotwordSignature(_: [DictionaryEntry]) -> String {
+        ""
     }
 
     private nonisolated func withTimeout<T: Sendable>(
