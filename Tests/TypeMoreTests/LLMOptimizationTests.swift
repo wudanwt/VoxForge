@@ -194,9 +194,22 @@ final class LLMOptimizationTests: XCTestCase {
             XCTAssertTrue(prompt.contains("术语"))
             XCTAssertTrue(prompt.contains("前后一致"))
             XCTAssertTrue(prompt.contains("口语赘余") || prompt.contains("无意义停顿"))
+            XCTAssertTrue(prompt.contains("最终意图"))
+            XCTAssertTrue(prompt.contains("自我修正"))
+            XCTAssertTrue(prompt.contains("修正关系明确"))
             XCTAssertTrue(prompt.contains("表达自己的意识"))
             XCTAssertTrue(prompt.contains("不要为了通顺而猜测"))
         }
+    }
+
+    func testDefaultPromptsHandleSemanticSelfCorrectionConservatively() {
+        let generalPrompt = OpenAICompatibleOptimizationService.defaultPromptTemplate(for: .general)
+        let codingPrompt = OpenAICompatibleOptimizationService.defaultPromptTemplate(for: .codingPrompt)
+
+        XCTAssertTrue(generalPrompt.contains("以最后明确表达的意图为准"))
+        XCTAssertTrue(generalPrompt.contains("不确定是在修正还是继续描述问题"))
+        XCTAssertTrue(codingPrompt.contains("删除被后文明确否定、替换或修正的前文"))
+        XCTAssertTrue(codingPrompt.contains("保留原意，不要脑补"))
     }
 
     func testCodingPromptMentionsVibeCodingConsistencyExample() {
