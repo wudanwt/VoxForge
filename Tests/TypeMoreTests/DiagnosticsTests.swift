@@ -192,4 +192,7 @@ private struct NoopHotkeyCoordinator: HotkeyCoordinator {
     ) -> [HotkeyRegistrationResult] {
         []
     }
+
+    @MainActor
+    func unregisterHotkeys() {}
 }

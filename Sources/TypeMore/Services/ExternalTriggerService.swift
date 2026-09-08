@@ -12,6 +12,7 @@ final class ExternalTriggerService: @unchecked Sendable {
         var productID: Int
         var suppressVolume: Bool
         var cancelModifier: ExternalTriggerCancelModifier
+        var cancelModifierEnabled: Bool
     }
 
     var onDevicesChanged: (([ExternalTriggerDevice], ExternalTriggerStatus) -> Void)?
@@ -200,7 +201,8 @@ final class ExternalTriggerService: @unchecked Sendable {
 
         pendingVolumeIncrementAt = CFAbsoluteTimeGetCurrent()
         logger.info("DJI volume_increment received")
-        let modifierPressed = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(configuration.cancelModifier.eventFlag)
+        let modifierPressed = configuration.cancelModifierEnabled
+            && NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(configuration.cancelModifier.eventFlag)
         if modifierPressed {
             logger.info("DJI modifier click -> cancel")
             onEvent?(ExternalTriggerLastEvent(type: .modifierClickCancel, date: Date(), suppressed: didSeizeSelectedDevice))

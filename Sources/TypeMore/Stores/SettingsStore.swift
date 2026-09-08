@@ -22,6 +22,23 @@ final class SettingsStore {
         set { setHotkey(newValue, forKey: "cancelHotkey") }
     }
 
+    var applicationOperatingMode: ApplicationOperatingMode {
+        get {
+            guard let rawValue = defaults.string(forKey: "applicationOperatingMode") else {
+                return .fullDictation
+            }
+            return ApplicationOperatingMode(rawValue: rawValue) ?? .fullDictation
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: "applicationOperatingMode")
+        }
+    }
+
+    var bridgeTargetHotkey: HotkeyDefinition {
+        get { hotkey(forKey: "bridgeTargetHotkey", fallback: dictationHotkey) }
+        set { setHotkey(newValue, forKey: "bridgeTargetHotkey") }
+    }
+
     var selectedMode: DictationMode {
         get {
             guard let rawValue = defaults.string(forKey: "selectedMode") else { return .codingPrompt }
@@ -87,14 +104,18 @@ final class SettingsStore {
             guard let data = defaults.data(forKey: "personalDictionary"),
                   let entries = try? JSONDecoder().decode([DictionaryEntry].self, from: data)
             else {
+                defaults.set(2, forKey: "personalDictionarySchemaVersion")
                 return DictionaryEntry.defaults
             }
-
-            return Self.sanitizedDictionary(entries)
+            let migrated = migratePersonalDictionaryIfNeeded(entries)
+            return Self.sanitizedDictionary(migrated)
         }
         set {
-            guard let data = try? JSONEncoder().encode(Self.sanitizedDictionary(newValue)) else { return }
+            let sanitized = Self.sanitizedDictionary(newValue)
+            guard Self.dictionaryValidationError(in: sanitized) == nil,
+                  let data = try? JSONEncoder().encode(sanitized) else { return }
             defaults.set(data, forKey: "personalDictionary")
+            defaults.set(2, forKey: "personalDictionarySchemaVersion")
         }
     }
 
@@ -108,8 +129,6 @@ final class SettingsStore {
         for entry in entries {
             let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !term.isEmpty else { continue }
-            guard !isLegacyDefaultEntry(entry, normalizedTerm: term) else { continue }
-
             let aliases = entry.aliases
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && dictionaryKey(for: $0) != dictionaryKey(for: term) }
@@ -118,15 +137,21 @@ final class SettingsStore {
                     result.append(alias)
                 }
             let note = entry.note.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let key = dictionaryKey(for: term)
-            output.removeAll { dictionaryKey(for: $0.term) == key }
+            let bundleIdentifiers = entry.scope.applicationBundleIdentifiers
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .reduce(into: [String]()) { result, bundleIdentifier in
+                    guard !result.contains(bundleIdentifier) else { return }
+                    result.append(bundleIdentifier)
+                }
             output.append(DictionaryEntry(
                 id: entry.id,
                 term: term,
                 aliases: aliases,
                 note: note,
-                isEnabled: entry.isEnabled
+                isEnabled: entry.isEnabled,
+                behavior: entry.behavior,
+                scope: DictionaryEntryScope(applicationBundleIdentifiers: bundleIdentifiers)
             ))
         }
 
@@ -138,6 +163,47 @@ final class SettingsStore {
             && entry.aliases.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.isEmpty
             && entry.note.trimmingCharacters(in: .whitespacesAndNewlines) == "AI 编程工作流常用术语"
             && entry.isEnabled
+    }
+
+    static func dictionaryValidationError(in entries: [DictionaryEntry]) -> String? {
+        let enabled = entries.filter { $0.isEnabled && !$0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        for entry in enabled where entry.behavior == .fixed && entry.aliases.isEmpty {
+            return "固定替换词条“\(entry.term)”至少需要一个常见误听"
+        }
+
+        for index in enabled.indices {
+            let current = enabled[index]
+            let currentTermKey = dictionaryKey(for: current.term)
+            let currentAliasKeys = Set(current.aliases.map { dictionaryKey(for: $0) })
+            for otherIndex in enabled.indices where otherIndex > index {
+                let other = enabled[otherIndex]
+                guard current.scope.overlaps(with: other.scope) else { continue }
+                let otherTermKey = dictionaryKey(for: other.term)
+                let otherAliasKeys = Set(other.aliases.map { dictionaryKey(for: $0) })
+                if currentTermKey == otherTermKey {
+                    return "标准词条“\(current.term)”重复"
+                }
+                if !currentAliasKeys.isDisjoint(with: otherAliasKeys)
+                    || currentAliasKeys.contains(otherTermKey)
+                    || otherAliasKeys.contains(currentTermKey) {
+                    return "词条“\(current.term)”和“\(other.term)”存在重叠的标准词或常见误听"
+                }
+            }
+        }
+        return nil
+    }
+
+    private func migratePersonalDictionaryIfNeeded(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        guard defaults.integer(forKey: "personalDictionarySchemaVersion") < 2 else { return entries }
+        let migrated = entries.filter { entry in
+            let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !Self.isLegacyDefaultEntry(entry, normalizedTerm: term)
+        }
+        if let data = try? JSONEncoder().encode(Self.sanitizedDictionary(migrated)) {
+            defaults.set(data, forKey: "personalDictionary")
+        }
+        defaults.set(2, forKey: "personalDictionarySchemaVersion")
+        return migrated
     }
 
     var llmOptimizationEnabled: Bool {
@@ -267,6 +333,7 @@ final class SettingsStore {
     }
 
     private static func dictionaryKey(for value: String) -> String {
-        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
     }
 }

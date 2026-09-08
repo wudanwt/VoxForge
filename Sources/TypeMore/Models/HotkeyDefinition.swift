@@ -9,6 +9,7 @@ struct HotkeyDefinition: Codable, Hashable {
     static let defaultDictation = HotkeyDefinition(keyCode: 2, modifiers: carbonModifiers(control: true, option: true))
     static let defaultReturn = HotkeyDefinition(keyCode: 36, modifiers: carbonModifiers(control: true, option: true))
     static let defaultCancel = HotkeyDefinition(keyCode: 53, modifiers: carbonModifiers(control: true, option: true))
+    static let plainReturn = HotkeyDefinition(keyCode: 36, modifiers: 0)
 
     var displayName: String {
         "\(modifierDisplayName)\(keyDisplayName)"

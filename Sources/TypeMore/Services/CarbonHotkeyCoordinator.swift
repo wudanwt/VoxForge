@@ -33,6 +33,16 @@ final class CarbonHotkeyCoordinator: HotkeyCoordinator {
         return results
     }
 
+    @MainActor
+    func unregisterHotkeys() {
+        unregisterHotkey(&toggleRef)
+        unregisterHotkey(&returnRef)
+        unregisterHotkey(&cancelRef)
+        toggleAction = nil
+        returnAction = nil
+        cancelAction = nil
+    }
+
     private func installHandlerIfNeeded() {
         guard eventHandler == nil else { return }
 
@@ -85,5 +95,12 @@ final class CarbonHotkeyCoordinator: HotkeyCoordinator {
         let hotKeyID = EventHotKeyID(signature: signature.ostype, id: id)
         let status = RegisterEventHotKey(hotkey.keyCode, hotkey.modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
         return HotkeyRegistrationResult(target: target, hotkey: hotkey, status: status)
+    }
+
+    private func unregisterHotkey(_ ref: inout EventHotKeyRef?) {
+        if let ref {
+            UnregisterEventHotKey(ref)
+        }
+        ref = nil
     }
 }

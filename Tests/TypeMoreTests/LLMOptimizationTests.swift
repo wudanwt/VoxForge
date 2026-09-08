@@ -103,7 +103,7 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(reloaded.personalDictionary.first?.note, "人名")
     }
 
-    func testSettingsStoreSanitizesAndResetsPersonalDictionary() {
+    func testSettingsStoreRejectsConflictingTermsAndResetsPersonalDictionary() {
         let suiteName = "TypeMoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -116,10 +116,11 @@ final class LLMOptimizationTests: XCTestCase {
         ]
 
         let reloaded = SettingsStore(defaults: defaults)
-        XCTAssertEqual(reloaded.personalDictionary.count, 1)
-        XCTAssertEqual(reloaded.personalDictionary.first?.term, "voxforge")
-        XCTAssertEqual(reloaded.personalDictionary.first?.aliases, ["声铸"])
-        XCTAssertEqual(reloaded.personalDictionary.first?.note, "应用名")
+        XCTAssertEqual(reloaded.personalDictionary, DictionaryEntry.defaults)
+        XCTAssertNotNil(SettingsStore.dictionaryValidationError(in: [
+            DictionaryEntry(term: "VoxForge", aliases: ["vox forge"]),
+            DictionaryEntry(term: "voxforge", aliases: ["声铸"])
+        ]))
 
         reloaded.resetPersonalDictionary()
         XCTAssertEqual(reloaded.personalDictionary, DictionaryEntry.defaults)
@@ -128,7 +129,7 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).personalDictionary, [])
     }
 
-    func testSettingsStoreRemovesLegacyVibeCodingDefaultEntry() {
+    func testSettingsStoreAllowsRecreatingFormerLegacyVibeCodingEntry() {
         let suiteName = "TypeMoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -140,7 +141,7 @@ final class LLMOptimizationTests: XCTestCase {
         ]
 
         let reloaded = SettingsStore(defaults: defaults)
-        XCTAssertEqual(reloaded.personalDictionary.map(\.term), ["SwiftUI"])
+        XCTAssertEqual(reloaded.personalDictionary.map(\.term), ["vibe coding", "SwiftUI"])
         XCTAssertFalse(DictionaryEntry.defaults.contains { $0.term.caseInsensitiveCompare("vibe coding") == .orderedSame })
     }
 
@@ -173,14 +174,33 @@ final class LLMOptimizationTests: XCTestCase {
         XCTAssertFalse(context.contains("停用词"))
     }
 
-    func testDictionaryContextSkipsTermsWithoutAliases() {
+    func testDictionaryContextIncludesSmartTermsWithoutAliases() {
         let context = OpenAICompatibleOptimizationService.dictionaryContext(from: [
             DictionaryEntry(term: "vibe coding", note: "AI 编程工作流常用术语"),
             DictionaryEntry(term: "Xcode", aliases: ["x code"])
         ])
 
-        XCTAssertFalse(context.contains("vibe coding"))
+        XCTAssertTrue(context.contains("vibe coding"))
         XCTAssertTrue(context.contains("Xcode"))
+    }
+
+    func testDictionaryContextFiltersFixedAndOutOfScopeTerms() {
+        let context = OpenAICompatibleOptimizationService.dictionaryContext(
+            from: [
+                DictionaryEntry(term: "SwiftUI", aliases: ["swift ui"], behavior: .fixed),
+                DictionaryEntry(
+                    term: "内部项目",
+                    note: "项目名",
+                    scope: DictionaryEntryScope(applicationBundleIdentifiers: ["com.example.editor"])
+                ),
+                DictionaryEntry(term: "全局人名", note: "人名")
+            ],
+            targetBundleIdentifier: "com.example.browser"
+        )
+
+        XCTAssertFalse(context.contains("SwiftUI"))
+        XCTAssertFalse(context.contains("内部项目"))
+        XCTAssertTrue(context.contains("全局人名"))
     }
 
     func testDefaultPromptsAskLLMToFixSemanticTyposAndGrammar() {

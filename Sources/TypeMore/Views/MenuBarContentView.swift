@@ -6,30 +6,47 @@ struct MenuBarContentView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        Button(appModel.primaryActionTitle) {
-            Task { await appModel.toggleDictation() }
-        }
+        if appModel.applicationOperatingMode == .fullDictation {
+            Button(appModel.primaryActionTitle) {
+                Task { await appModel.toggleDictation() }
+            }
 
-        Button("中断当前流程") {
-            appModel.interruptCurrentFlow()
-        }
-        .disabled(appModel.sessionState == .idle)
+            Button("中断当前流程") {
+                appModel.interruptCurrentFlow()
+            }
+            .disabled(appModel.sessionState == .idle)
 
-        Button("发送回车") {
-            appModel.sendReturn()
-        }
+            Button("发送回车") {
+                appModel.sendReturn()
+            }
 
-        Divider()
+            Divider()
 
-        Picker("模式", selection: selectedModeBinding) {
-            ForEach(DictationMode.allCases) { mode in
-                Text(mode.title).tag(mode)
+            Picker("模式", selection: selectedModeBinding) {
+                ForEach(DictationMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+        } else {
+            Text("DJI 桥接：\(appModel.externalTriggerStatus.title)")
+            Text("下一次：\(appModel.bridgeNextActionTitle)")
+
+            Button("测试发送 \(appModel.bridgeTargetHotkey.displayName)") {
+                appModel.sendBridgeTargetHotkey()
+            }
+
+            Button("重置三段循环") {
+                appModel.resetBridgeClickCycle()
+            }
+
+            if let event = appModel.externalTriggerLastEvent {
+                Text("最近：\(event.summary)")
             }
         }
 
         Divider()
 
-        Button("打开 VoxForge") {
+        Button(appModel.applicationOperatingMode == .fullDictation ? "打开 VoxForge" : "打开桥接状态") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }

@@ -67,6 +67,28 @@ final class UtilityTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).historyRetention, .sevenDays)
     }
 
+    func testSettingsStorePersistsOperatingModeAndIndependentBridgeHotkey() {
+        let suiteName = "TypeMoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let dictationHotkey = HotkeyDefinition(keyCode: 11, modifiers: HotkeyDefinition.defaultDictation.modifiers)
+        let bridgeHotkey = HotkeyDefinition(keyCode: 49, modifiers: HotkeyDefinition.defaultDictation.modifiers)
+        let store = SettingsStore(defaults: defaults)
+
+        XCTAssertEqual(store.applicationOperatingMode, .fullDictation)
+        store.dictationHotkey = dictationHotkey
+        XCTAssertEqual(store.bridgeTargetHotkey, dictationHotkey)
+
+        store.applicationOperatingMode = .djiHotkeyBridge
+        store.bridgeTargetHotkey = bridgeHotkey
+
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.applicationOperatingMode, .djiHotkeyBridge)
+        XCTAssertEqual(reloaded.dictationHotkey, dictationHotkey)
+        XCTAssertEqual(reloaded.bridgeTargetHotkey, bridgeHotkey)
+    }
+
     private func temporaryDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("TypeMoreTests-\(UUID().uuidString)", isDirectory: true)

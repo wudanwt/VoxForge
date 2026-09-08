@@ -5,22 +5,33 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(selection: selectedModeBinding)
-        } detail: {
-            VStack(alignment: .leading, spacing: 18) {
-                HeaderView(appModel: appModel)
-                PermissionBannerView(appModel: appModel)
-                ModePickerView(selectedMode: selectedModeBinding)
-                LastTranscriptView(text: appModel.lastTranscript)
-                HistoryListView(records: Array(appModel.transcriptRecords.prefix(12)))
+        Group {
+            if appModel.applicationOperatingMode == .fullDictation {
+                NavigationSplitView {
+                    SidebarView(selection: selectedModeBinding)
+                } detail: {
+                    VStack(alignment: .leading, spacing: 18) {
+                        HeaderView(appModel: appModel)
+                        PermissionBannerView(appModel: appModel)
+                        ModePickerView(selectedMode: selectedModeBinding)
+                        LastTranscriptView(text: appModel.lastTranscript)
+                        HistoryListView(records: Array(appModel.transcriptRecords.prefix(12)))
+                    }
+                    .padding(24)
+                    .frame(minWidth: 680, minHeight: 560, alignment: .topLeading)
+                }
+            } else {
+                BridgeDashboardView(appModel: appModel)
             }
-            .padding(24)
-            .frame(minWidth: 680, minHeight: 560, alignment: .topLeading)
         }
         .onAppear {
             appModel.refreshPermissions()
-            appModel.refreshSpeechModelStatus()
+            if appModel.applicationOperatingMode == .fullDictation {
+                appModel.refreshSpeechModelStatus()
+            } else {
+                appModel.startExternalTriggerIfNeeded()
+                appModel.recheckExternalTrigger()
+            }
         }
         .onChange(of: scenePhase) { _, newValue in
             if newValue == .active {
@@ -34,6 +45,85 @@ struct ContentView: View {
             get: { appModel.selectedMode },
             set: { appModel.updateSelectedMode($0) }
         )
+    }
+}
+
+private struct BridgeDashboardView: View {
+    @Bindable var appModel: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 32))
+                    .foregroundStyle(appModel.externalTriggerStatus == .listening ? .green : .secondary)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("DJI 快捷键桥接")
+                        .font(.largeTitle.weight(.semibold))
+                    Text(appModel.bridgeStatusMessage)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            PermissionBannerView(appModel: appModel)
+
+            GroupBox("桥接配置") {
+                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 12) {
+                    GridRow {
+                        Text("DJI 设备")
+                            .foregroundStyle(.secondary)
+                        Text(appModel.externalTriggerStatus.title)
+                    }
+                    GridRow {
+                        Text("目标快捷键")
+                            .foregroundStyle(.secondary)
+                        Text(appModel.bridgeTargetHotkey.displayName)
+                            .font(.title3.monospaced())
+                    }
+                    GridRow {
+                        Text("下一次按钮")
+                            .foregroundStyle(.secondary)
+                        Text(appModel.bridgeNextActionTitle)
+                    }
+                    GridRow {
+                        Text("音量事件")
+                            .foregroundStyle(.secondary)
+                        Text(appModel.externalTriggerSuppressVolume ? "尝试阻止" : "保留系统音量变化")
+                    }
+                    GridRow {
+                        Text("最近事件")
+                            .foregroundStyle(.secondary)
+                        Text(appModel.externalTriggerLastEvent?.summary ?? "尚未收到")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+            }
+
+            HStack {
+                Button("测试发送 \(appModel.bridgeTargetHotkey.displayName)") {
+                    appModel.sendBridgeTargetHotkey()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("重新检测 DJI 设备") {
+                    appModel.recheckExternalTrigger()
+                }
+
+                Button("重置三段循环") {
+                    appModel.resetBridgeClickCycle()
+                }
+            }
+
+            Text("DJI 按钮按三次为一轮：开始外部听写、结束外部听写、发送回车。第三次后会自动回到第一步；如果外部软件状态失步，可手动重置循环。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+        }
+        .padding(28)
+        .frame(minWidth: 680, minHeight: 480, alignment: .topLeading)
     }
 }
 

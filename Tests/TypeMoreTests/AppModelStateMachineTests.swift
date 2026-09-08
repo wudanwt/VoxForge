@@ -37,20 +37,23 @@ final class AppModelStateMachineTests: XCTestCase {
         let appModel = AppModel(
             audioRecorder: StateMachineAudioRecorder(),
             transcriptionEngine: StateMachineTranscriptionEngine(),
-            sherpaStreamingEngine: StateMachineStreamingEngine(finalText: "本地文本"),
+            sherpaStreamingEngine: StateMachineStreamingEngine(finalText: "用 swift ui"),
             streamingAudioRecorder: StateMachineLiveAudioRecorder(),
             llmOptimizationService: FailingLLMService(),
             textInsertionService: RecordingTextInsertionService(),
             permissionCoordinator: StateMachinePermissionCoordinator(),
             hotkeyCoordinator: StateMachineHotkeyCoordinator()
         )
+        appModel.personalDictionary = [
+            DictionaryEntry(term: "SwiftUI", aliases: ["swift ui"], behavior: .fixed)
+        ]
         appModel.updateLLMOptimizationEnabled(true)
 
         await appModel.startDictation()
         await appModel.finishDictation()
 
         XCTAssertEqual(appModel.sessionState, .readyToSubmit)
-        XCTAssertEqual(appModel.lastTranscript, "本地文本")
+        XCTAssertEqual(appModel.lastTranscript, "用 SwiftUI")
     }
 
     func testStartFailureLeavesAppFailed() async {
@@ -110,6 +113,126 @@ final class AppModelStateMachineTests: XCTestCase {
         let startSessionCount = await engine.startSessionCountSnapshot()
         XCTAssertEqual(startSessionCount, 0)
     }
+
+    func testBridgeModeUsesTwoDictationShortcutsThenReturnAndRepeats() async {
+        let settingsStore = isolatedSettingsStore()
+        settingsStore.applicationOperatingMode = .djiHotkeyBridge
+        let targetHotkey = HotkeyDefinition(keyCode: 49, modifiers: HotkeyDefinition.defaultDictation.modifiers)
+        settingsStore.bridgeTargetHotkey = targetHotkey
+        let sender = RecordingSyntheticHotkeySender()
+        let engine = StateMachineStreamingEngine()
+        let hotkeyCoordinator = RecordingHotkeyCoordinator()
+        let appModel = AppModel(
+            audioRecorder: StateMachineAudioRecorder(),
+            transcriptionEngine: StateMachineTranscriptionEngine(),
+            sherpaStreamingEngine: engine,
+            streamingAudioRecorder: StateMachineLiveAudioRecorder(),
+            textInsertionService: RecordingTextInsertionService(),
+            permissionCoordinator: StateMachinePermissionCoordinator(),
+            hotkeyCoordinator: hotkeyCoordinator,
+            syntheticHotkeySender: sender,
+            settingsStore: settingsStore
+        )
+
+        appModel.configureHotkeysIfNeeded()
+        appModel.prewarmDefaultRecognitionBackendIfNeeded()
+        await appModel.handleExternalPrimaryTrigger()
+        XCTAssertEqual(appModel.bridgeClickStep, .stopDictation)
+        await appModel.handleExternalPrimaryTrigger()
+        XCTAssertEqual(appModel.bridgeClickStep, .sendReturn)
+        await appModel.handleExternalPrimaryTrigger()
+
+        let prepareCount = await engine.prepareCountSnapshot()
+        let startSessionCount = await engine.startSessionCountSnapshot()
+        XCTAssertEqual(sender.sentHotkeys, [targetHotkey, targetHotkey, .plainReturn])
+        XCTAssertEqual(appModel.bridgeClickStep, .startDictation)
+        XCTAssertEqual(appModel.sessionState, .idle)
+        XCTAssertEqual(hotkeyCoordinator.registerCount, 0)
+        XCTAssertEqual(hotkeyCoordinator.unregisterCount, 1)
+        XCTAssertEqual(prepareCount, 0)
+        XCTAssertEqual(startSessionCount, 0)
+    }
+
+    func testFullModeDJITriggerStillStartsInternalDictation() async {
+        let sender = RecordingSyntheticHotkeySender()
+        let appModel = AppModel(
+            audioRecorder: StateMachineAudioRecorder(),
+            transcriptionEngine: StateMachineTranscriptionEngine(),
+            sherpaStreamingEngine: StateMachineStreamingEngine(),
+            streamingAudioRecorder: StateMachineLiveAudioRecorder(),
+            textInsertionService: RecordingTextInsertionService(),
+            permissionCoordinator: StateMachinePermissionCoordinator(),
+            hotkeyCoordinator: RecordingHotkeyCoordinator(),
+            syntheticHotkeySender: sender,
+            settingsStore: isolatedSettingsStore()
+        )
+
+        await appModel.handleExternalPrimaryTrigger()
+
+        XCTAssertEqual(appModel.sessionState, .recording)
+        XCTAssertTrue(sender.sentHotkeys.isEmpty)
+    }
+
+    func testSwitchingModesInterruptsRecordingAndUnregistersThenRestoresHotkeys() async {
+        let hotkeyCoordinator = RecordingHotkeyCoordinator()
+        let appModel = AppModel(
+            audioRecorder: StateMachineAudioRecorder(),
+            transcriptionEngine: StateMachineTranscriptionEngine(),
+            sherpaStreamingEngine: StateMachineStreamingEngine(),
+            streamingAudioRecorder: StateMachineLiveAudioRecorder(),
+            textInsertionService: RecordingTextInsertionService(),
+            permissionCoordinator: StateMachinePermissionCoordinator(),
+            hotkeyCoordinator: hotkeyCoordinator,
+            syntheticHotkeySender: RecordingSyntheticHotkeySender(),
+            settingsStore: isolatedSettingsStore()
+        )
+        appModel.configureHotkeysIfNeeded()
+        await appModel.startDictation()
+        XCTAssertEqual(appModel.sessionState, .recording)
+
+        appModel.updateApplicationOperatingMode(.djiHotkeyBridge)
+
+        XCTAssertEqual(appModel.sessionState, .idle)
+        XCTAssertEqual(hotkeyCoordinator.unregisterCount, 1)
+        XCTAssertEqual(appModel.hotkeyStatusMessage, "桥接模式下已停用 VoxForge 全局快捷键")
+
+        appModel.updateApplicationOperatingMode(.fullDictation)
+
+        XCTAssertEqual(hotkeyCoordinator.registerCount, 2)
+        XCTAssertEqual(appModel.applicationOperatingMode, .fullDictation)
+    }
+
+    func testBridgeHotkeyFailureIsVisible() {
+        let settingsStore = isolatedSettingsStore()
+        settingsStore.applicationOperatingMode = .djiHotkeyBridge
+        let sender = RecordingSyntheticHotkeySender(error: SyntheticHotkeySenderError.eventCreationFailed)
+        let appModel = AppModel(
+            audioRecorder: StateMachineAudioRecorder(),
+            transcriptionEngine: StateMachineTranscriptionEngine(),
+            sherpaStreamingEngine: StateMachineStreamingEngine(),
+            streamingAudioRecorder: StateMachineLiveAudioRecorder(),
+            textInsertionService: RecordingTextInsertionService(),
+            permissionCoordinator: StateMachinePermissionCoordinator(),
+            hotkeyCoordinator: RecordingHotkeyCoordinator(),
+            syntheticHotkeySender: sender,
+            settingsStore: settingsStore
+        )
+
+        appModel.sendBridgeTargetHotkey()
+
+        XCTAssertTrue(appModel.bridgeStatusMessage.contains("发送失败"))
+        XCTAssertTrue(appModel.errorMessage?.contains("无法发送目标快捷键") == true)
+        XCTAssertEqual(appModel.bridgeClickStep, .startDictation)
+    }
+
+    private func isolatedSettingsStore() -> SettingsStore {
+        let suiteName = "TypeMoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return SettingsStore(defaults: defaults)
+    }
 }
 
 private struct StateMachineAudioRecorder: AudioRecordingService {
@@ -141,6 +264,7 @@ private actor StateMachineStreamingEngine: StreamingSpeechEngine {
     private let finalText: String
     private let prepareError: Error?
     private let prepareDelayNanoseconds: UInt64
+    private(set) var prepareCount = 0
     private(set) var startSessionCount = 0
 
     init(finalText: String = "最终文本", prepareError: Error? = nil, prepareDelayNanoseconds: UInt64 = 0) {
@@ -150,6 +274,7 @@ private actor StateMachineStreamingEngine: StreamingSpeechEngine {
     }
 
     func prepare(dictionary: [DictionaryEntry], progress: @escaping @Sendable (SpeechModelState) -> Void) async throws -> SpeechModelState {
+        prepareCount += 1
         if prepareDelayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: prepareDelayNanoseconds)
         }
@@ -186,6 +311,10 @@ private actor StateMachineStreamingEngine: StreamingSpeechEngine {
 
     func startSessionCountSnapshot() -> Int {
         startSessionCount
+    }
+
+    func prepareCountSnapshot() -> Int {
+        prepareCount
     }
 }
 
@@ -227,6 +356,47 @@ private struct StateMachineHotkeyCoordinator: HotkeyCoordinator {
         onCancel: @escaping () -> Void
     ) -> [HotkeyRegistrationResult] {
         []
+    }
+
+    @MainActor
+    func unregisterHotkeys() {}
+}
+
+@MainActor
+private final class RecordingHotkeyCoordinator: HotkeyCoordinator {
+    private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
+
+    func registerHotkeys(
+        dictationHotkey: HotkeyDefinition,
+        returnHotkey: HotkeyDefinition,
+        cancelHotkey: HotkeyDefinition,
+        onToggleDictation: @escaping () -> Void,
+        onSendReturn: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) -> [HotkeyRegistrationResult] {
+        registerCount += 1
+        return []
+    }
+
+    func unregisterHotkeys() {
+        unregisterCount += 1
+    }
+}
+
+private final class RecordingSyntheticHotkeySender: SyntheticHotkeySending {
+    private(set) var sentHotkeys: [HotkeyDefinition] = []
+    private let error: Error?
+
+    init(error: Error? = nil) {
+        self.error = error
+    }
+
+    func send(_ hotkey: HotkeyDefinition) throws {
+        if let error {
+            throw error
+        }
+        sentHotkeys.append(hotkey)
     }
 }
 

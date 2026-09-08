@@ -104,4 +104,7 @@ protocol HotkeyCoordinator {
         onSendReturn: @escaping () -> Void,
         onCancel: @escaping () -> Void
     ) -> [HotkeyRegistrationResult]
+
+    @MainActor
+    func unregisterHotkeys()
 }

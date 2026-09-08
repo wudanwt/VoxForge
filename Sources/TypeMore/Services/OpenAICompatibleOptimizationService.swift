@@ -189,16 +189,22 @@ final class OpenAICompatibleOptimizationService: LLMOptimizationService {
             .replacingOccurrences(of: "{dictionary}", with: dictionaryContext)
     }
 
-    static func dictionaryContext(from entries: [DictionaryEntry]) -> String {
+    static func dictionaryContext(
+        from entries: [DictionaryEntry],
+        targetBundleIdentifier: String = "*"
+    ) -> String {
         let lines = entries
-            .filter(\.isEnabled)
+            .filter {
+                $0.isEnabled
+                    && $0.behavior == .smart
+                    && $0.scope.includes(bundleIdentifier: targetBundleIdentifier)
+            }
             .compactMap { entry -> String? in
                 let term = entry.term.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !term.isEmpty else { return nil }
                 let aliases = entry.aliases
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
-                guard !aliases.isEmpty else { return nil }
                 let note = entry.note.trimmingCharacters(in: .whitespacesAndNewlines)
                 var parts = ["标准词条：\(term)"]
                 if !aliases.isEmpty {

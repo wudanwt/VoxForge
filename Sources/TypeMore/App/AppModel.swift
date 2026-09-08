@@ -26,6 +26,10 @@ final class AppModel {
     var returnHotkey: HotkeyDefinition
     var cancelHotkey = HotkeyDefinition.defaultCancel
     var hotkeyStatusMessage = "快捷键尚未注册"
+    var applicationOperatingMode: ApplicationOperatingMode
+    var bridgeTargetHotkey: HotkeyDefinition
+    var bridgeStatusMessage = "DJI 快捷键桥接尚未触发"
+    var bridgeClickStep: BridgeClickStep = .startDictation
     var llmOptimizationEnabled: Bool
     var llmBaseURL: String
     var llmModel: String
@@ -56,9 +60,11 @@ final class AppModel {
     private var appleSpeechAnalyzerEngine: StreamingSpeechEngine?
     private let llmOptimizationService: LLMOptimizationService
     private let postProcessor: PostProcessingService
+    private let personalDictionaryProcessor: PersonalDictionaryProcessing
     private let textInsertionService: TextInsertionService
     private let permissionCoordinator: PermissionCoordinator
     private let hotkeyCoordinator: HotkeyCoordinator
+    private let syntheticHotkeySender: SyntheticHotkeySending
     private let externalTriggerService: ExternalTriggerService
     private let diagnosticsRecorder: DiagnosticsRecorder
     private let diagnosticPackageExporter: DiagnosticPackageExporter
@@ -67,7 +73,7 @@ final class AppModel {
     private var recordingStart: Date?
     private var activeDictationPath: ActiveDictationPath?
     private let historyStore: HistoryStore
-    private let settingsStore = SettingsStore()
+    private let settingsStore: SettingsStore
     private let keychainStore = KeychainStore()
     private let hudController = DictationHUDController()
     private var activeOperationID: UUID?
@@ -92,10 +98,14 @@ final class AppModel {
         sherpaModelManager: SherpaModelManager = SherpaModelManager(),
         llmOptimizationService: LLMOptimizationService = OpenAICompatibleOptimizationService(),
         postProcessor: PostProcessingService = CodingPromptPostProcessor(),
+        personalDictionaryProcessor: PersonalDictionaryProcessing = PersonalDictionaryProcessor(),
         textInsertionService: TextInsertionService = PasteboardTextInsertionService(),
         permissionCoordinator: PermissionCoordinator = SystemPermissionCoordinator(),
-        hotkeyCoordinator: HotkeyCoordinator = CarbonHotkeyCoordinator()
+        hotkeyCoordinator: HotkeyCoordinator = CarbonHotkeyCoordinator(),
+        syntheticHotkeySender: SyntheticHotkeySending = CGEventSyntheticHotkeySender(),
+        settingsStore: SettingsStore = SettingsStore()
     ) {
+        self.settingsStore = settingsStore
         self.audioRecorder = audioRecorder
         self.diagnosticsRecorder = diagnosticsRecorder
         self.diagnosticPackageExporter = DiagnosticPackageExporter(recorder: diagnosticsRecorder)
@@ -113,12 +123,16 @@ final class AppModel {
         }
         self.llmOptimizationService = llmOptimizationService
         self.postProcessor = postProcessor
+        self.personalDictionaryProcessor = personalDictionaryProcessor
         self.textInsertionService = textInsertionService
         self.permissionCoordinator = permissionCoordinator
         self.hotkeyCoordinator = hotkeyCoordinator
+        self.syntheticHotkeySender = syntheticHotkeySender
         self.dictationHotkey = settingsStore.dictationHotkey
         self.returnHotkey = settingsStore.returnHotkey
         self.cancelHotkey = settingsStore.cancelHotkey
+        self.applicationOperatingMode = settingsStore.applicationOperatingMode
+        self.bridgeTargetHotkey = settingsStore.bridgeTargetHotkey
         self.saveHistory = settingsStore.saveHistory
         let persistedHistoryRetention = settingsStore.historyRetention
         self.historyRetention = persistedHistoryRetention
@@ -151,11 +165,12 @@ final class AppModel {
         self.externalTriggerSuppressVolume = settingsStore.externalTriggerSuppressVolume
         self.externalTriggerCancelModifier = settingsStore.externalTriggerCancelModifier
         self.externalTriggerService = ExternalTriggerService(configuration: ExternalTriggerService.Configuration(
-            enabled: settingsStore.externalTriggerEnabled,
+            enabled: settingsStore.applicationOperatingMode == .djiHotkeyBridge || settingsStore.externalTriggerEnabled,
             vendorID: settingsStore.externalTriggerVendorID,
             productID: settingsStore.externalTriggerProductID,
             suppressVolume: settingsStore.externalTriggerSuppressVolume,
-            cancelModifier: settingsStore.externalTriggerCancelModifier
+            cancelModifier: settingsStore.externalTriggerCancelModifier,
+            cancelModifierEnabled: settingsStore.applicationOperatingMode == .fullDictation
         ))
         updateRecognitionBackendStatus(persistedBackend)
         configureExternalTrigger()
@@ -210,6 +225,11 @@ final class AppModel {
 
     @discardableResult
     func configureHotkeysIfNeeded() -> [HotkeyRegistrationResult] {
+        guard applicationOperatingMode == .fullDictation else {
+            hotkeyCoordinator.unregisterHotkeys()
+            hotkeyStatusMessage = "桥接模式下已停用 VoxForge 全局快捷键"
+            return []
+        }
         let results = hotkeyCoordinator.registerHotkeys(
             dictationHotkey: dictationHotkey,
             returnHotkey: returnHotkey,
@@ -231,10 +251,18 @@ final class AppModel {
     func startAppServicesAfterLaunch() {
         guard !didStartAppServices else { return }
         didStartAppServices = true
-        configureHotkeysIfNeeded()
+        if applicationOperatingMode == .fullDictation {
+            configureHotkeysIfNeeded()
+        } else {
+            hotkeyCoordinator.unregisterHotkeys()
+            hotkeyStatusMessage = "桥接模式下已停用 VoxForge 全局快捷键"
+            bridgeStatusMessage = "等待 DJI Mic 按钮"
+        }
         startExternalTriggerIfNeeded()
         refreshPermissions()
-        scheduleDeferredSherpaPrewarm(reason: "应用启动", delay: 3.0)
+        if applicationOperatingMode == .fullDictation {
+            scheduleDeferredSherpaPrewarm(reason: "应用启动", delay: 3.0)
+        }
     }
 
     func startExternalTriggerIfNeeded() {
@@ -246,6 +274,7 @@ final class AppModel {
     }
 
     private func startSherpaPrewarmIfEligible(respectSuppression: Bool) {
+        guard applicationOperatingMode == .fullDictation else { return }
         guard recognitionBackend == .sherpaParaformer else { return }
         guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
         if respectSuppression,
@@ -271,6 +300,7 @@ final class AppModel {
     }
 
     private func scheduleDeferredSherpaPrewarm(reason: String, delay: TimeInterval = 1.0) {
+        guard applicationOperatingMode == .fullDictation else { return }
         guard recognitionBackend == .sherpaParaformer else { return }
         guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
         deferredSherpaPrewarmTask?.cancel()
@@ -292,6 +322,11 @@ final class AppModel {
         deferredSherpaPrewarmTask = nil
     }
 
+    private func cancelAllSherpaPrewarm() {
+        cancelDeferredSherpaPrewarm()
+        sherpaPrewarmTask?.cancel()
+    }
+
     private func suppressAutomaticSherpaPrewarm(for seconds: TimeInterval) {
         suppressAutomaticPrewarmUntil = Date().addingTimeInterval(seconds)
         cancelDeferredSherpaPrewarm()
@@ -299,6 +334,7 @@ final class AppModel {
 
     private func prewarmSherpaRecognizer() async {
         defer { sherpaPrewarmTask = nil }
+        guard applicationOperatingMode == .fullDictation else { return }
         guard activeOperationID == nil, sessionState == .idle || sessionState == .failed || sessionState == .readyToSubmit else { return }
         do {
             speechModelState = .downloading(1)
@@ -315,12 +351,14 @@ final class AppModel {
                     }
                 }
             }
-            guard recognitionBackend == .sherpaParaformer else { return }
+            guard applicationOperatingMode == .fullDictation,
+                  recognitionBackend == .sherpaParaformer else { return }
             guard activeOperationID == nil else { return }
             speechModelState = state
             modelStatus = state.title
         } catch {
-            guard recognitionBackend == .sherpaParaformer else { return }
+            guard applicationOperatingMode == .fullDictation,
+                  recognitionBackend == .sherpaParaformer else { return }
             guard activeOperationID == nil else { return }
             speechModelState = .failed(error.localizedDescription)
             modelStatus = speechModelState.title
@@ -342,17 +380,37 @@ final class AppModel {
         }
         externalTriggerService.onPrimaryTrigger = { [weak self] in
             Task { @MainActor in
-                await self?.toggleDictation()
+                await self?.handleExternalPrimaryTrigger()
             }
         }
         externalTriggerService.onCancelTrigger = { [weak self] in
             Task { @MainActor in
-                self?.interruptCurrentFlow()
+                await self?.handleExternalCancelTrigger()
             }
         }
     }
 
+    func handleExternalPrimaryTrigger() async {
+        if applicationOperatingMode == .djiHotkeyBridge {
+            handleBridgeDJIClick()
+        } else {
+            await toggleDictation()
+        }
+    }
+
+    func handleExternalCancelTrigger() async {
+        if applicationOperatingMode == .djiHotkeyBridge {
+            handleBridgeDJIClick()
+        } else {
+            interruptCurrentFlow()
+        }
+    }
+
     func toggleDictation() async {
+        guard applicationOperatingMode == .fullDictation else {
+            bridgeStatusMessage = "桥接模式只响应 DJI Mic 按钮或测试发送"
+            return
+        }
         switch sessionState {
         case .idle, .failed:
             await startDictation()
@@ -368,6 +426,10 @@ final class AppModel {
     }
 
     func startDictation() async {
+        guard applicationOperatingMode == .fullDictation else {
+            bridgeStatusMessage = "桥接模式不会启动录音"
+            return
+        }
         cancelDeferredSherpaPrewarm()
         let operationID = UUID()
         activeOperationID = operationID
@@ -797,12 +859,18 @@ final class AppModel {
         )
         let targetApp = lastTargetApplication ?? RunningApplicationInfo.frontmost()
         let profile = profile(for: targetApp.bundleIdentifier)
-        let processed = postProcessor.process(
+        let locallyCleaned = postProcessor.process(
             rawTranscript,
             mode: selectedMode,
             profile: profile,
             dictionary: personalDictionary
         )
+        let initialDictionaryResult = personalDictionaryProcessor.process(
+            locallyCleaned,
+            entries: personalDictionary,
+            targetBundleIdentifier: targetApp.bundleIdentifier
+        )
+        let processed = initialDictionaryResult.text
         var finalText = processed
         var optimizedWithLLM = false
 
@@ -828,7 +896,7 @@ final class AppModel {
                     rawText: rawTranscript,
                     mode: selectedMode,
                     profile: profile,
-                    configuration: llmConfiguration
+                    configuration: llmConfiguration(for: targetApp.bundleIdentifier)
                 )
                 guard isActiveOperation(operationID) else { return }
                 optimizedWithLLM = true
@@ -855,6 +923,12 @@ final class AppModel {
                 message: "大模型优化未启用"
             )
         }
+
+        finalText = personalDictionaryProcessor.process(
+            finalText,
+            entries: personalDictionary,
+            targetBundleIdentifier: targetApp.bundleIdentifier
+        ).text
 
         lastTranscript = finalText
         recordDiagnostic(
@@ -1258,8 +1332,12 @@ final class AppModel {
                 sessionState = .idle
                 hudController.hide()
             }
-            statusMessage = "辅助功能权限已开启，可以开始听写。"
-            scheduleDeferredSherpaPrewarm(reason: "辅助功能权限已开启", delay: 1.5)
+            if applicationOperatingMode == .fullDictation {
+                statusMessage = "辅助功能权限已开启，可以开始听写。"
+                scheduleDeferredSherpaPrewarm(reason: "辅助功能权限已开启", delay: 1.5)
+            } else {
+                statusMessage = "辅助功能权限已开启，可以发送目标快捷键。"
+            }
         }
     }
 
@@ -1276,7 +1354,19 @@ final class AppModel {
 
     func updateDictionaryEntry(_ entry: DictionaryEntry) {
         guard let index = personalDictionary.firstIndex(where: { $0.id == entry.id }) else { return }
-        personalDictionary[index] = entry
+        var updatedEntries = personalDictionary
+        updatedEntries[index] = entry
+        let sanitized = SettingsStore.sanitizedDictionary(updatedEntries)
+        if let validationError = SettingsStore.dictionaryValidationError(in: sanitized) {
+            if entry.behavior == .fixed && entry.aliases.isEmpty {
+                personalDictionary = updatedEntries
+                statusMessage = validationError
+                return
+            }
+            statusMessage = validationError
+            return
+        }
+        personalDictionary = updatedEntries
         persistPersonalDictionary()
     }
 
@@ -1290,6 +1380,129 @@ final class AppModel {
         settingsStore.resetPersonalDictionary()
         personalDictionary = settingsStore.personalDictionary
         statusMessage = "词典已恢复默认"
+    }
+
+    func previewFixedDictionaryReplacement(_ text: String, targetBundleIdentifier: String) -> String {
+        personalDictionaryProcessor.process(
+            text,
+            entries: personalDictionary,
+            targetBundleIdentifier: targetBundleIdentifier
+        ).text
+    }
+
+    func updateApplicationOperatingMode(_ mode: ApplicationOperatingMode) {
+        guard applicationOperatingMode != mode else { return }
+
+        if mode == .djiHotkeyBridge {
+            if sessionState == .inserting {
+                activeOperationID = nil
+                activeDictationPath = nil
+                transition(to: .idle, message: "已切换到 DJI 快捷键桥接模式")
+                hudController.hide()
+            } else {
+                interruptCurrentFlow()
+            }
+            cancelAllSherpaPrewarm()
+            hotkeyCoordinator.unregisterHotkeys()
+            hotkeyStatusMessage = "桥接模式下已停用 VoxForge 全局快捷键"
+            bridgeStatusMessage = "等待 DJI Mic 按钮"
+            bridgeClickStep = .startDictation
+            statusMessage = "DJI 快捷键桥接模式已启用"
+            errorMessage = nil
+        }
+
+        applicationOperatingMode = mode
+        settingsStore.applicationOperatingMode = mode
+        updateExternalTriggerConfiguration()
+
+        if mode == .fullDictation {
+            bridgeStatusMessage = "DJI 快捷键桥接尚未触发"
+            bridgeClickStep = .startDictation
+            statusMessage = "完整听写模式已启用"
+            if errorMessage?.contains("目标快捷键") == true {
+                errorMessage = nil
+            }
+            configureHotkeysIfNeeded()
+            if didStartAppServices {
+                scheduleDeferredSherpaPrewarm(reason: "已切回完整听写模式", delay: 1.0)
+            }
+        }
+    }
+
+    func updateBridgeTargetHotkey(_ hotkey: HotkeyDefinition) {
+        bridgeTargetHotkey = hotkey
+        settingsStore.bridgeTargetHotkey = hotkey
+        bridgeClickStep = .startDictation
+        bridgeStatusMessage = "目标快捷键已设置为 \(hotkey.displayName)"
+    }
+
+    func sendBridgeTargetHotkey() {
+        guard applicationOperatingMode == .djiHotkeyBridge else { return }
+        _ = sendSyntheticBridgeHotkey(
+            bridgeTargetHotkey,
+            successMessage: "测试成功：已发送目标快捷键 \(bridgeTargetHotkey.displayName)"
+        )
+    }
+
+    func handleBridgeDJIClick() {
+        guard applicationOperatingMode == .djiHotkeyBridge else { return }
+
+        switch bridgeClickStep {
+        case .startDictation:
+            if sendSyntheticBridgeHotkey(
+                bridgeTargetHotkey,
+                successMessage: "第 1 次：已发送听写快捷键，外部听写应已开始"
+            ) {
+                bridgeClickStep = .stopDictation
+            }
+        case .stopDictation:
+            if sendSyntheticBridgeHotkey(
+                bridgeTargetHotkey,
+                successMessage: "第 2 次：已发送听写快捷键，外部听写应已结束"
+            ) {
+                bridgeClickStep = .sendReturn
+            }
+        case .sendReturn:
+            if sendSyntheticBridgeHotkey(
+                .plainReturn,
+                successMessage: "第 3 次：已发送回车，循环已重新开始"
+            ) {
+                bridgeClickStep = .startDictation
+            }
+        }
+    }
+
+    func resetBridgeClickCycle() {
+        bridgeClickStep = .startDictation
+        bridgeStatusMessage = "三段循环已重置，下一次将开始外部听写"
+        statusMessage = bridgeStatusMessage
+    }
+
+    var bridgeNextActionTitle: String {
+        bridgeClickStep.nextActionTitle
+    }
+
+    @discardableResult
+    private func sendSyntheticBridgeHotkey(
+        _ hotkey: HotkeyDefinition,
+        successMessage: String
+    ) -> Bool {
+        do {
+            try syntheticHotkeySender.send(hotkey)
+            bridgeStatusMessage = successMessage
+            statusMessage = bridgeStatusMessage
+            if errorMessage?.contains("目标快捷键") == true || errorMessage?.contains("辅助功能权限") == true {
+                errorMessage = nil
+            }
+            refreshPermissions()
+            return true
+        } catch {
+            bridgeStatusMessage = "发送失败：\(error.localizedDescription)"
+            errorMessage = "无法发送目标快捷键：\(error.localizedDescription)"
+            statusMessage = bridgeStatusMessage
+            refreshPermissions()
+            return false
+        }
     }
 
     func updateHotkey(_ target: HotkeyTarget, to hotkey: HotkeyDefinition) {
@@ -1562,18 +1775,27 @@ final class AppModel {
     }
 
     func testExternalTriggerButton() {
+        if applicationOperatingMode == .djiHotkeyBridge {
+            sendBridgeTargetHotkey()
+            return
+        }
         externalTriggerLastEvent = ExternalTriggerLastEvent(type: .singleClick, date: Date(), suppressed: false)
         statusMessage = "请按下 DJI Mic 按钮，最近事件会显示在设置页。"
     }
 
     private func updateExternalTriggerConfiguration() {
         externalTriggerService.update(configuration: ExternalTriggerService.Configuration(
-            enabled: externalTriggerEnabled,
+            enabled: isExternalTriggerEffectivelyEnabled,
             vendorID: externalTriggerVendorID,
             productID: externalTriggerProductID,
             suppressVolume: externalTriggerSuppressVolume,
-            cancelModifier: externalTriggerCancelModifier
+            cancelModifier: externalTriggerCancelModifier,
+            cancelModifierEnabled: applicationOperatingMode == .fullDictation
         ))
+    }
+
+    var isExternalTriggerEffectivelyEnabled: Bool {
+        applicationOperatingMode == .djiHotkeyBridge || externalTriggerEnabled
     }
 
     private func persistPersonalDictionary() {
@@ -1585,7 +1807,7 @@ final class AppModel {
         personalDictionary = sanitized + draftEntries
     }
 
-    var llmConfiguration: LLMOptimizationConfiguration {
+    func llmConfiguration(for targetBundleIdentifier: String = "*") -> LLMOptimizationConfiguration {
         LLMOptimizationConfiguration(
             isEnabled: llmOptimizationEnabled,
             baseURL: llmBaseURL,
@@ -1593,7 +1815,10 @@ final class AppModel {
             model: llmModel,
             styleInstruction: llmStyleInstruction,
             customPrompt: settingsStore.llmPromptTemplate(for: selectedMode),
-            dictionaryContext: OpenAICompatibleOptimizationService.dictionaryContext(from: personalDictionary)
+            dictionaryContext: OpenAICompatibleOptimizationService.dictionaryContext(
+                from: personalDictionary,
+                targetBundleIdentifier: targetBundleIdentifier
+            )
         )
     }
 

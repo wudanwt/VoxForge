@@ -14,21 +14,29 @@ struct TypeMoreApp: App {
                 }
         }
         .commands {
-            CommandMenu("听写") {
-                Button(appModel.primaryActionTitle) {
-                    Task { await appModel.toggleDictation() }
-                }
-                .keyboardShortcut("d", modifiers: [.command, .option])
+            if appModel.applicationOperatingMode == .fullDictation {
+                CommandMenu("听写") {
+                    Button(appModel.primaryActionTitle) {
+                        Task { await appModel.toggleDictation() }
+                    }
+                    .keyboardShortcut("d", modifiers: [.command, .option])
 
-                Button("发送回车") {
-                    appModel.sendReturn()
-                }
-                .keyboardShortcut(.return, modifiers: [.command, .option])
+                    Button("发送回车") {
+                        appModel.sendReturn()
+                    }
+                    .keyboardShortcut(.return, modifiers: [.command, .option])
 
-                Button("取消听写") {
-                    appModel.cancelDictation()
+                    Button("取消听写") {
+                        appModel.cancelDictation()
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
                 }
-                .keyboardShortcut(.escape, modifiers: [])
+            } else {
+                CommandMenu("DJI 桥接") {
+                    Button("测试发送目标快捷键") {
+                        appModel.sendBridgeTargetHotkey()
+                    }
+                }
             }
         }
 
